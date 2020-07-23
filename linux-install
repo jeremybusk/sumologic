@@ -1,0 +1,42 @@
+!#/usr/bin/env bash
+set -ex  # Use -ex for debugging
+# Installs deb/rpm on hosts
+# Login to cloud and set local sources, i.e /var/log/messages under Manage Data->Collection->yourhostname
+# releasever=$(echo ${VERSION_ID} | awk -F. '{print $1}')  # Used for Redhat
+. /etc/os-release
+hostname=$(hostname)
+accessid=MYID
+accesskey=MYKEY
+
+if [[ "${ID}" =~ ^(rhel|centos)$ ]]; then
+  pkg_app=yum
+  pkg_ext=rpm
+  sumo_download_url="https://collectors.au.sumologic.com/rest/download/rpm/64"
+  VERSION_ID=$(echo ${VERSION_ID} | awk -F. '{print $1}')  # Used for Redhat/Centos 7 and older
+  sudo ${pkg_app} install -y curl
+elif [[ "${ID}" =~ ^(ubuntu|debian)$ ]]; then
+  pkg_app=apt
+  pkg_ext=deb
+  sumo_download_url="https://collectors.au.sumologic.com/rest/download/deb/64"
+  sudo ${pkg_app} install -y curl
+else
+  echo "OS ${ID} ${VERSION_ID} is not supported."
+fi
+
+function uninstall_sumologic() {
+  sudo ${pkg_app} remove -y SumoCollector
+}
+
+function install_sumologic() {
+  curl -L ${sumo_download_url} -o sumologic64.${pkg_ext}
+  sudo ${pkg_app} install -y ./sumologic64.${pkg_ext}
+  echo -e "name=${hostname}\naccessid=${accessid}\naccesskey=${accesskey}" | sudo tee /opt/SumoCollector/config/user.properties
+  # sudo cd /opt/SumoCollector
+  # sudo ./collector install
+  # sudo /opt/SumoCollector/collector install
+  sudo /opt/SumoCollector/collector start
+  # sudo ./collector start
+}
+
+uninstall_sumologic
+install_sumologic
