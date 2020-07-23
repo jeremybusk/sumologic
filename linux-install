@@ -3,10 +3,14 @@ set -ex  # Use -ex for debugging
 # Installs deb/rpm on hosts
 # Login to cloud and set local sources, i.e /var/log/messages under Manage Data->Collection->yourhostname
 # releasever=$(echo ${VERSION_ID} | awk -F. '{print $1}')  # Used for Redhat
-. /etc/os-release
+
+if [ "$#" -ne 2 ]; then
+    echo "Usage: $0 <accessid> <accesskey>"
+fi
+accessid=$1
+accesskey=$2
 hostname=$(hostname)
-accessid=MYID
-accesskey=MYKEY
+. /etc/os-release
 
 if [[ "${ID}" =~ ^(rhel|centos)$ ]]; then
   pkg_app=yum
