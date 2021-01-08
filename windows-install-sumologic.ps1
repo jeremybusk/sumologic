@@ -3,12 +3,13 @@
 # Usage: ./windows-install-sumologic -t <my secret token>
 # Uninstall: C:\Program Files\Sumo Logic Collector\uninstall.exe -q -console
 
-$ErrorActionPreference = "Stop"
+
 Param(
   [Parameter(Mandatory=$true)]
   [string]$token,
   [string]$hostname = ($env:computerName).tolower()
 )
+$ErrorActionPreference = "Stop"
 
 $install_dir="C:\Sum"
 if(!(test-path $install_dir)){
@@ -21,7 +22,9 @@ Invoke-WebRequest 'https://raw.githubusercontent.com/jeremybusk/sumologic/master
 C:\Windows\Temp\SumoCollector.exe -console -q -Vclobber=True "-Vsumo.token_and_url=$token" "-Vcollector.name=$hostname_events" "-Vsources=$install_dir\"
 
 # Tests
-if ((get-service -name sumo-collector).status -ne "Running"){
-  write-host "ERROR: Serivce is not running. Install appears to have failed."
-  exit 1
+function test_sumo_collector_service(){
+  if ((get-service -name sumo-collector).status -ne "Running"){
+    write-host "ERROR: Serivce is not running. Install appears to have failed."
+    exit 1
+  }
 }
