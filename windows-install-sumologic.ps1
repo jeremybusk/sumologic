@@ -1,6 +1,7 @@
 # Install and register sumologic collector via token with specified default sources.json
 # https://help.sumologic.com/03Send-Data/Installed-Collectors/05Reference-Information-for-Collector-Installation/04Add_a_Collector_to_a_Windows_Machine_Image
 # Usage: ./windows-install-sumologic -t <my secret token>
+# Uninstall: C:\Program Files\Sumo Logic Collector\uninstall.exe -q -console
 
 $ErrorActionPreference = "Stop"
 Param(
