@@ -40,7 +40,9 @@ function test_not_running(){
     exit 1
   }
   
-  function main(){
+function main(){
   test_not_running
   install
-  }
+}
+
+main
