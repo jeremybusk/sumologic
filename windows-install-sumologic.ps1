@@ -13,7 +13,7 @@ $ErrorActionPreference = "Stop"
 $install_dir="C:\Sum"
 
 
-function install(){  
+function install() {
   if(!(test-path $install_dir)){
     New-Item -ItemType Directory -Force -Path $install_dir
   }
@@ -26,8 +26,8 @@ function install(){
 
 
 # Tests
-function test_sumo_collector_service_not_running(){
-  if ((get-service -name sumo-collector).status -ne "Running"){
+function test_sumo_collector_service_not_running() {
+  if ((get-service -name sumo-collector).status -ne "Running") {
     write-host "ERROR: Serivce is not running. Install appears to have failed."
     exit 1
   }
@@ -35,12 +35,14 @@ function test_sumo_collector_service_not_running(){
 
 
 function test_not_running(){
-  if ((get-service -name sumo-collector).status -eq "Running"){
+  # if ((get-service -name sumo-collector).status -eq "Running") {
+  if (get-service | findstr -i sumo-collector) {
     write-host "ERROR: Serivce is already installed and running. Exiting install."
     exit 1
   }
-  
-function main(){
+}
+
+function main() {
   test_not_running
   install
 }
