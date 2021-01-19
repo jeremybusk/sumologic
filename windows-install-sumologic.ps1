@@ -45,6 +45,10 @@ function test_not_running(){
   }
 }
 
+function uninstall(){
+  C:\Program` Files\Sumo` Logic` Collector\uninstall.exe -q -console
+}
+
 function main() {
   test_not_running
   install
