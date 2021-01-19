@@ -4,16 +4,16 @@
 # Uninstall: C:\Program Files\Sumo Logic Collector\uninstall.exe -q -console
 
 
-# Param(
-#   [Parameter(Mandatory=$true)]
-  # [string]$token,
+Param(
+  [Parameter(Mandatory=$true)]
+  [string]$token,
   # [string]$hostname = ($env:computerName).tolower()
-# )
+)
 
 $ErrorActionPreference = "Stop"
 $install_dir="C:\Sum"
 $hostname=((hostname).tolower())
-$token="yoursecrettokenfromsumo"
+# $token="yoursecrettokenfromsumo"
 
 
 function install() {
