@@ -18,4 +18,15 @@ console install
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]'Tls12'
 Invoke-WebRequest 'https://collectors.us2.sumologic.com/rest/download/win64' -outfile 'C:\Windows\Temp\SumoCollector.exe'
 C:\Windows\Temp\SumoCollector.exe -console -q "-Vclobber=false" "-Vsumo.token_and_url=<mytokenurl>" "-Vcollector.name=<myhostname>_events"
-``
+```
+
+# Quick install
+```
+$install_dir="C:\tmp\sumo"
+$hostname=((hostname).tolower())
+$token="YOURTOKEN"
+mkdir $install_dir
+Invoke-WebRequest 'https://collectors.us2.sumologic.com/rest/download/win64' -outfile 'C:\Windows\Temp\SumoCollector.exe'
+Invoke-WebRequest 'https://raw.githubusercontent.com/jeremybusk/sumologic/master/windows_default_sources.json' -outfile "$install_dir\sources.json"
+C:\Windows\Temp\SumoCollector.exe -console -q -Vclobber=True "-Vsumo.token_and_url=$token" "-Vcollector.name=$hostname_events" "-Vsources=$install_dir\"
+```
