@@ -30,3 +30,12 @@ Invoke-WebRequest 'https://collectors.us2.sumologic.com/rest/download/win64' -ou
 Invoke-WebRequest 'https://raw.githubusercontent.com/jeremybusk/sumologic/master/windows_default_sources.json' -outfile "$install_dir\sources.json"
 C:\Windows\Temp\SumoCollector.exe -console -q -Vclobber=True "-Vsumo.token_and_url=$token" "-Vcollector.name=${hostname}_events" "-Vsources=$install_dir\"
 ```
+
+Linux RPM example
+```
+/opt/SumoCollector/config/user.properties
+name = <collectorName>
+url=https://collectors.sumologic.com
+token=SUMOXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+```
+systemctl restart collector
