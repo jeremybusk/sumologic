@@ -20,8 +20,8 @@ def get(url):
 
         # print("sleep 5")
         # time.sleep(5)
-        # host = "TXV-GENVUI01-1497389440988"
-        # host = "wjp1-itsupport"
+        # host = "testhost1"
+        # host = "texthost2"
         # alive = False
         # item["osName"] = "Windows 2008"
 
