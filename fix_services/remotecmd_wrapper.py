@@ -27,13 +27,10 @@ def get_os(host):
 def get_remoteshell_port(host):
     if test_tcp_port_open(host, 22) == 0:
         return 22, 'ssh'
-        # return 22
     elif test_tcp_port_open(host, 5986) == 0:
         return 5986, 'winrm'
-        # return 5986
     elif test_tcp_port_open(host, 5985) == 0:
         return 5985, 'winrm'
-        # return 5985
     else:
         return "unknown", 'unknown'
 
@@ -43,7 +40,7 @@ def test_is_valid_host_or_ipaddr(host):
         ipaddress.ip_address(host)
         return 0
     except:
-        pass
+        pass 
     try:
         socket.gethostbyname(host)
         return 0
@@ -139,14 +136,11 @@ class RcmdClient:
     # rshport, rshproto = get_remoteshell_port
     # def __init__(self, host, user, password):
     def __init__(self, host, username, userpass, transport='ntlm', server_cert_validation='validate'):
-        # rshport = get_remoteshell_port
-        # rshport, rshproto = get_remoteshell_port(host)
         self.rshport, self.shproto = get_remoteshell_port(host)
-        # print(rshport)
-        # print(rshport)
-        # print(type(rshport))
-        # rshport = 5986 
-        # rshport = 22 
+        if test_is_valid_host_or_ipaddr(host) != 0:
+           print("ERROR: host is not resolvable or invalid ip addr.")
+           return
+
         if self.rshport == ssh_port:
             client = paramiko.SSHClient()
             client.load_system_host_keys()
@@ -156,8 +150,6 @@ class RcmdClient:
             self.user = username
             self.password = userpass 
             self.host = host
-            # self.rshport = rshport 
-            # self.rshproto = rshproto 
         elif self.rshport == winrm_port_https or self.rshport == winrm_port_http:
             client = winrm.Session(host, auth=(username, userpass), transport=transport, server_cert_validation=server_cert_validation)
             self.client = client
@@ -165,8 +157,6 @@ class RcmdClient:
             self.userpass = userpass 
             self.transport = transport 
             self.server_cert_validation =  server_cert_validation 
-            # self.rshport = rshport 
-            # self.rshproto = rshproto 
         else:
             sys.exit('ERROR: Unsupported rsh port!')
 
@@ -177,6 +167,9 @@ class RcmdClient:
             self.client = None
     
     def execute(self, cmd, log=True, logfile='./ssh.log'):
+        global ssh_port
+        global winrm_port_http
+        global winrm_port_https
         if self.rshport == ssh_port:
             use_password = False
             sudo = cmd.strip().split()[0]
@@ -205,8 +198,6 @@ class RcmdClient:
                 format="%(asctime)s %(name)s:%(levelname)s:%(message)s", 
                 datefmt="%F %A %T", 
                 level=logging.INFO)
-            print('foo')
-            print(cmd)
             rsp = self.client.run_ps(cmd)
             exit_status = rsp.status_code
             out = rsp.std_out.decode()

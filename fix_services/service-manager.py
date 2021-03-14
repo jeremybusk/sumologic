@@ -298,8 +298,8 @@ def test_ssh_rcmd():
 def test_winrm_rcmd():
     USERNAME = config('WINRM_USERNAME')
     USERPASS = config('WINRM_USERPASS')
-    s2 = RcmdClient('ws-w10', USERNAME, USERPASS, transport='ssl', server_cert_validation='ignore')
-    rsp = s2.execute("ipconfig /all")
+    s = RcmdClient('ws-w10', USERNAME, USERPASS, transport='ssl', server_cert_validation='ignore')
+    rsp = s.execute("ipconfig /all")
     print(rsp['cmd'])
     print(rsp['out'])
     print(rsp['err'])
