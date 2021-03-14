@@ -189,3 +189,41 @@ class WinrmClient:
             'err': err
             }
         return rsp
+
+
+# TRASH
+def sshcmd_alt(host, cmd):
+    USERNAME = config('LINUX_USERNAME')
+    USERPASS = config('LINUX_USERPASS')
+    TIMEOUT = 30
+    PORT = 22
+    ssh = Session()
+
+    try:
+        ssh.connect(
+            host=host,
+            user=USERNAME,
+            password=USERPASS,
+            timeout=TIMEOUT,
+            port=PORT,
+        )
+    except LibsshSessionException as ssh_exc:
+        print(f'Failed to connect to {HOST}:{PORT} over SSH: {ssh_exc!s}')
+
+    print(f'{ssh.is_connected}')
+
+    ssh_channel = ssh.new_channel()
+    cmd_resp = ssh_channel.write(b'ls')
+    print(f'stdout:\n{cmd_resp.stdout}\n')
+    print(f'stderr:\n{cmd_resp.stderr}\n')
+    print(f'return code: {cmd_resp.returncode}\n')
+    ssh_channel.close()
+
+    chan_shell = ssh.invoke_shell()
+    # chan_shell.sendall(b'ls')
+    chan_shell.sendall(cmd)
+    data = chan_shell.read_bulk_response(timeout=2, retry=10)
+    chan_shell.close()
+    print(data)
+
+    ssh.close()
