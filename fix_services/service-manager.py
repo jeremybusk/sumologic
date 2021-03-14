@@ -137,7 +137,8 @@ def test_tcp_port_open(host, port):
 def test_ssh_rcmd():
     USERNAME = config('SSH_USERNAME')
     USERPASS = config('SSH_USERPASS')
-    s = RcmdClient('lxd0-sandbox', USERNAME, USERPASS)
+    # s = RcmdClient('lxd0-sandbox', USERNAME, USERPASS)
+    s = RcmdClient('lxd0-sandbox', USERNAME, USERPASS, rshport=22)
     rsp = s.execute("ip address")
     print(rsp['cmd'])
     print(rsp['out'])
@@ -165,7 +166,7 @@ def test_win_service_restart():
 if __name__ == "__main__":
     # USERNAME = config('REMOTESHELL_USERNAME')
     # USERPASS = config('REMOTESHELL_USERPASS')
-    # test_ssh_rcmd()
+    test_ssh_rcmd()
     # test_winrm_rcmd()
-    test_win_service_restart()
+    # test_win_service_restart()
     # fix_stopped_collectors("https://api.us2.sumologic.com/api/v1/collectors")

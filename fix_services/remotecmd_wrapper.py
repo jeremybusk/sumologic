@@ -67,10 +67,12 @@ def test_tcp_port_open(host, port):
 
 class RcmdClient:
     """Winrm and ssh wrapper class that currently uses pywinrm and paramiko"""
-    # rshport, rshproto = get_remoteshell_port
-    # def __init__(self, host, user, password):
-    def __init__(self, host, username, userpass, transport='ntlm', server_cert_validation='validate'):
-        self.rshport, self.shproto = get_remoteshell_port(host)
+    def __init__(self, host, username, userpass, transport='ntlm', server_cert_validation='validate', rshport=None, rshproto=None):
+        if rshport:
+            self.rshport = rshport 
+            self.rshproto = rshproto 
+        else:
+            self.rshport, self.shproto = get_remoteshell_port(host)
         if test_is_valid_host_or_ipaddr(host) != 0:
            print("ERROR: host is not resolvable or invalid ip addr.")
            return
@@ -146,49 +148,6 @@ class RcmdClient:
                 'err': err
                 }
             return rsp
-
-
-class WinrmClient:
-    """Winrm and ssh wrapper class that currently uses pywinrm and paramiko"""
-
-    def __init__(self, host, username, userpass, transport='ntlm', server_cert_validation='validate'):
-        client = winrm.Session(host, auth=(username, userpass), transport=transport, server_cert_validation=server_cert_validation)
-        self.client = client
-        self.username = username
-        self.userpass = userpass 
-        self.transport = transport 
-        self.server_cert_validation =  server_cert_validation 
-
-
-    def close(self):
-        if self.client is not None:
-            self.client.close()
-            self.client = None
-
-
-    def execute(self, cmd, log=True, logfile='./winrm.log'):
-        #logging.basicConfig(filename='/tmp/example.log', encoding='utf-8', level=logging.DEBUG)
-        # Use "nohup" before cmds to keep shell scripts running after return.
-        # rsp = self.client.run_ps(cmd)
-        logging.basicConfig(handlers=[logging.FileHandler(filename=logfile,
-            encoding='utf-8', mode='a+')],
-            format="%(asctime)s %(name)s:%(levelname)s:%(message)s", 
-            datefmt="%F %A %T", 
-            level=logging.INFO)
-        rsp = self.client.run_ps(cmd)
-        exit_status = rsp.status_code
-        out = rsp.std_out.decode()
-        err = rsp.std_err.decode()
-        if log:
-            logging.info(cmd)
-
-        rsp = {
-            'exit_status': exit_status,
-            'cmd': cmd,
-            'out': out,
-            'err': err
-            }
-        return rsp
 
 
 # TRASH
