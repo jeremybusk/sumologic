@@ -24,6 +24,7 @@ def get_os(host):
     else:
         return "unknown"
 
+
 def get_remoteshell_port(host):
     if test_tcp_port_open(host, 22) == 0:
         return 22, 'ssh'
@@ -62,73 +63,6 @@ def test_tcp_port_open(host, port):
     # sock.settimeout(None)
     except:
         return 1
-
-
-class SshClient:
-
-    def __init__(self, host, username, userpass):
-        logfile='./ssh.log'
-        paramiko.util.log_to_file(logfile)
-        logging.basicConfig(handlers=[logging.FileHandler(filename=logfile,
-            encoding='utf-8', mode='a+')],
-            format="%(asctime)s %(name)s:%(levelname)s:%(message)s", 
-            datefmt="%F %A %T", 
-            level=logging.INFO)
-        client = paramiko.SSHClient()
-        client.load_system_host_keys()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(host, username=username, password=userpass)
-        self.client = client
-        self.username = username
-        self.userpass = userpass 
-
-    def close(self):
-        if self.client is not None:
-            self.client.close()
-            self.client = None
-
-    # Use "nohup" before cmds to keep shell scripts running after return.
-    # def execute(self, cmd):
-    def execute(self, cmd, log=True, logfile='./ssh.log'):
-        #if log:
-            # logging.info(cmd)
-	#    paramiko.util.log_to_file(logfile)
-        use_password = False
-        sudo = cmd.strip().split()[0]
-        if sudo == 'sudo' and self.user != "root":
-            # cmd = "sudo -S -p ' ' %s" % cmd
-            cmd = f"sudo -S -p ' ' {cmd}"
-            use_password = self.userpass is not None and len(self.userpass) > 0
-        stdin, stdout, stderr = self.client.exec_command(cmd, get_pty=True)
-        if use_password:
-            stdin.write(self.userpass + "\n")
-            stdin.flush()
-
-        r = {
-            'exit_status': stdout.channel.recv_exit_status(),
-            'cmd': cmd,
-            'out': bytes.decode(stdout.read()),
-            'err': bytes.decode(stderr.read())
-            }
-        return r
-        # if usejson:
-        #    json.loads(a)
-
-
-def remote_cmd():
-    rshport = 5986 
-    rshport = 22 
-    if rshport == 22:
-        s = SshClient('lxd0-sandbox', USERNAME, USERPASS)
-        rsp = s.execute("ip address")
-    elif rshport == 5986:
-        cmd = 'ipconfig /all'
-        s = WinrmClient('ws-w10', USERNAME, USERPASS, transport='ssl', server_cert_validation='ignore')
-        rsp = s.execute(cmd)
-    print(rsp['cmd'])
-    print(rsp['out'])
-    print(rsp['err'])
-    print(rsp['exit_status'])
 
 
 class RcmdClient:
@@ -255,46 +189,3 @@ class WinrmClient:
             'err': err
             }
         return rsp
-
-
-def rpsh(host, cmd):
-    if test_os_detect(host) == "windows":
-        USERNAME = config('REMOTESHELL_USERNAME')
-        USERPASS = config('REMOTESHELL_USERPASS')
-        s = winrm.Session(host, auth=(USERNAME, USERPASS), transport='ntlm')
-        r = s.run_ps(cmd)
-        if r.status_code == 0:
-            r.stdout = r.std_out.decode().strip()
-            r.stderr = r.std_err.decode().strip()
-            return r
-        else:
-            r.stdout = r.std_out.decode().strip()
-            r.stderr = r.std_err.decode().strip()
-            print(f"E: {r.stderr}")
-            r.status = r.status_code
-    elif test_os_detect(host) == "linux":
-        print(f"{host} OS is Linux.")
-        r = sshcmd(host, cmd)
-        # if r.statuscode == 0:
-        # print(vars(r))
-        # print(r)
-        print('aa')
-        print(r['stdout'].decode())
-        print('aa')
-        if r.stdout:
-            r.stdin = r.stdin.decode().strip()
-            r.stdout = r.stdout.decode().strip()
-            r.stderr = r.stderr.decode().strip()
-            return r
-        else:
-            r.stdin = r.stdin.decode().strip()
-            r.stdout = r.stdout.decode().strip()
-            r.stderr = r.stderr.decode().strip()
-            print(f"E: {r.stderr}")
-            return r
-        print("done")
-    else:
-        print(f"{host} OS is unsupported.")
-        return
-
-        return r
