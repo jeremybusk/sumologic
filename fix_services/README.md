@@ -16,3 +16,10 @@ WINRM_USERPASS=
 SSH_USERNAME=
 SSH_USERPASS=
 ```
+
+# Run
+```
+./service-manager.py 
+```
+
+I will be upgrading this shortly when I have time. So these are just basic instructions but haven't written tests yet or tested in general.
