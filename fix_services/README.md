@@ -1,8 +1,9 @@
 # Prep env
-From this directory
 
 # Create venv or use another method you prefer
 ```
+git clone https://github.com/jeremybusk/sumologic.git
+cd fix_services
 sudo apt install python3-venv  # on ubuntu or yum if redhat
 python3 -m venv venv
 source venv/bin/activate
