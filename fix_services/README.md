@@ -1,8 +1,9 @@
 # Prep env
-From this directory
 
 # Create venv or use another method you prefer
 ```
+git clone https://github.com/jeremybusk/sumologic.git
+cd fix_services
 sudo apt install python3-venv  # on ubuntu or yum if redhat
 python3 -m venv venv
 source venv/bin/activate
@@ -12,8 +13,8 @@ pip install -r requirements.txt
 
 .env  # Create .env file with your SECRETS.
 ```
-SUMO_USERNAME=
-SUMO_USERPASS=
+SUMO_USERNAME= this is api user from sumo web
+SUMO_USERPASS= this is api secret from sumo web
 WINRM_USERNAME=
 WINRM_USERPASS=
 SSH_USERNAME=
@@ -25,9 +26,25 @@ SSH_USERPASS=
 ./service-manager.py 
 ```
 
+OUtput is noisy now but the hosts it will try and restart service on look like but I don't test for failures yet
+```
+===============================
+txd2-enrapply starting stopped service sumo-collector
+================================
+```
+
 I will be upgrading this shortly when I have time. So these are just basic instructions but haven't written tests yet or tested in general.
 
 # Exit venv environment
 ```
 deactivate
+```
+
+And simple methods but lots of manual
+```
+invoke-command -computername ${host} -scriptblock {get-service sumo-collector}
+invoke-command -computername ${host} -scriptblock {start-service sumo-collector}
+
+ssh ${host} systemctl status collector
+ssh ${host} systemctl start collector
 ```
