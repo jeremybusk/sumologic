@@ -13,17 +13,16 @@ pip install -r requirements.txt
 
 .env  # Create .env file with your SECRETS.
 ```
-SUMO_USERNAME= this is api user from sumo web
-SUMO_USERPASS= this is api secret from sumo web
-WINRM_USERNAME=
-WINRM_USERPASS=
-SSH_USERNAME=
-SSH_USERPASS=
+SUMO_ACCESS_ID=<your access id from sumo cloud>
+SUMO_ACCESS_KEY=<your access key from sumo cloud>>
+USERNAME=<username with host perms>
+USERPASS=<username pass>
 ```
 
-# Run
+# Run every 10 minutes
 ```
-./service-manager.py 
+./service-manager.py -i 1800  # Uses .env values
+./service-manager.py -i 1800 -u myuser -s mysumoaccessid  # Will prompt for password and key and you don't need .env file
 ```
 
 OUtput is noisy now but the hosts it will try and restart service on look like but I don't test for failures yet
