@@ -26,6 +26,13 @@ SSH_USERPASS=
 ./service-manager.py 
 ```
 
+OUtput is noisy now but the hosts it will try and restart service on look like but I don't test for failures yet
+```
+===============================
+txd2-enrapply starting stopped service sumo-collector
+================================
+```
+
 I will be upgrading this shortly when I have time. So these are just basic instructions but haven't written tests yet or tested in general.
 
 # Exit venv environment
