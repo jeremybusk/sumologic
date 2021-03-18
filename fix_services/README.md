@@ -39,3 +39,12 @@ I will be upgrading this shortly when I have time. So these are just basic instr
 ```
 deactivate
 ```
+
+And simple methods but lots of manual
+```
+invoke-command -computername ${host} -scriptblock {get-service sumo-collector}
+invoke-command -computername ${host} -scriptblock {start-service sumo-collector}
+
+ssh ${host} systemctl status collector
+ssh ${host} systemctl start collector
+```
