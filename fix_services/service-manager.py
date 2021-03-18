@@ -22,8 +22,8 @@ from decouple import config
 # import nmap
 # from pythonping import ping
 import paramiko
-from pylibsshext.errors import LibsshSessionException
-from pylibsshext.session import Session
+# from pylibsshext.errors import LibsshSessionException
+# from pylibsshext.session import Session
 import requests
 from requests.auth import HTTPBasicAuth
 import winrm
@@ -33,10 +33,14 @@ def fix_stopped_collectors(url):
     USERNAME = config('SUMO_USERNAME')
     USERPASS = config('SUMO_USERPASS')
     r = requests.get(url, auth=HTTPBasicAuth(USERNAME, USERPASS))
+    if r.status_code != 200:
+        print("ERROR: API 401: Invalid auth? Check user/pass or api token combo.")
+        return 1
     items = r.json()['collectors']
     for item in items:
         host = item['name'].replace('_events', '')
         alive = item['alive']
+        # print(f"{host} alive = {alive}")
 
         ### Test Values ###
         # time.sleep(5)
@@ -48,7 +52,7 @@ def fix_stopped_collectors(url):
 
         if test_is_valid_host_or_ipaddr(host) != 0:
             continue
-        if(alive == False):
+        if(alive != False):
             continue
         try:
             os = ""
@@ -56,7 +60,8 @@ def fix_stopped_collectors(url):
         except:
             continue
         if "windows" in os.lower():
-            print(f"{host} {alive} {os}")
+            print(f"host: {host} alive: {alive} os: {os}")
+            time.sleep(3)
             restart_service_if_stopped(host, "sumo-collector")
         elif "linux" in os.lower():
             print(f"{host} operating system is Linux.")
@@ -79,20 +84,36 @@ def test_os_detect(host):
 def restart_service_if_stopped(host, servicename):
     USERNAME = config('WINRM_USERNAME')
     USERPASS = config('WINRM_USERPASS')
-    print(f"{host} starting service {servicename}")
+    print(f"{host}: Checking service status for {servicename}.")
     cmd = f"(get-service {servicename}).Status"
     # r = rcmd(host, cmd)
-    s = RcmdClient(host, USERNAME, USERPASS, transport='ssl', server_cert_validation='ignore')
-    rsp = s.execute(cmd)
+    # s = RcmdClient(host, USERNAME, USERPASS, transport='ntlm')
+    try:
+        s = RcmdClient(host, USERNAME, USERPASS, transport='ntlm', server_cert_validation='ignore')
+        rsp = s.execute(cmd)
+        status = rsp['out'].strip()
+        print(status)
+    except:
+        return
+    # s = RcmdClient(host, USERNAME, USERPASS, transport='ntlm')
+    # s = RcmdClient(host, USERNAME, USERPASS)
     # print(r.stdout)
-    print(rsp['out'])
-    status = rsp['out'].strip()
-    print(status)
+    # print(rsp['out'])
+    # print('foo')
+    # sys.exit()
     if status == "Stopped":
+        print('================================')
         print(f"{host} starting stopped service {servicename}")
+        print('================================')
+        # time.sleep(5)
+        # host = "txd1-enrapply"
         # cmd = "get-eventlog system -n 3 | Select-Object -Property * | findstr -i sumologic"
         cmd = f"start-service {servicename}"
-        s = RcmdClient(host, USERNAME, USERPASS, transport='ssl', server_cert_validation='ignore')
+        try:
+          s = RcmdClient(host, USERNAME, USERPASS, transport='ntlm', server_cert_validation='ignore')
+        except:
+            return
+        # s = RcmdClient(host, USERNAME, USERPASS, transport='ntlm')
         rsp = s.execute(cmd)
         # print(rsp)
         # print(r.stdout)
@@ -166,7 +187,7 @@ def test_win_service_restart():
 if __name__ == "__main__":
     # USERNAME = config('REMOTESHELL_USERNAME')
     # USERPASS = config('REMOTESHELL_USERPASS')
-    test_ssh_rcmd()
+    # test_ssh_rcmd()
     # test_winrm_rcmd()
     # test_win_service_restart()
-    # fix_stopped_collectors("https://api.us2.sumologic.com/api/v1/collectors")
+    fix_stopped_collectors("https://api.us2.sumologic.com/api/v1/collectors")

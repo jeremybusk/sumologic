@@ -26,12 +26,12 @@ def get_os(host):
 
 
 def get_remoteshell_port(host):
-    if test_tcp_port_open(host, 22) == 0:
-        return 22, 'ssh'
-    elif test_tcp_port_open(host, 5986) == 0:
+    if test_tcp_port_open(host, 5986) == 0:
         return 5986, 'winrm'
     elif test_tcp_port_open(host, 5985) == 0:
         return 5985, 'winrm'
+    elif test_tcp_port_open(host, 22) == 0:
+        return 22, 'ssh'
     else:
         return "unknown", 'unknown'
 
@@ -75,7 +75,7 @@ class RcmdClient:
             self.rshport, self.shproto = get_remoteshell_port(host)
         if test_is_valid_host_or_ipaddr(host) != 0:
            print("ERROR: host is not resolvable or invalid ip addr.")
-           return
+           return 1
 
         if self.rshport == ssh_port:
             client = paramiko.SSHClient()
@@ -83,8 +83,8 @@ class RcmdClient:
             client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             client.connect(host, username=username, password=userpass)
             self.client = client
-            self.user = username
-            self.password = userpass 
+            self.username = username
+            self.userpass = userpass 
             self.host = host
         elif self.rshport == winrm_port_https or self.rshport == winrm_port_http:
             client = winrm.Session(host, auth=(username, userpass), transport=transport, server_cert_validation=server_cert_validation)
@@ -94,7 +94,11 @@ class RcmdClient:
             self.transport = transport 
             self.server_cert_validation =  server_cert_validation 
         else:
-            sys.exit('ERROR: Unsupported rsh port!')
+            # sys.exit('ERROR: Unsupported rsh port!')
+            print('ERROR: Unsupported rsh port or host down!')
+            # return 1
+            # return None
+        # return 0
 
 
     def close(self):

@@ -3,11 +3,11 @@ From this directory
 
 # Create venv or use another method you prefer
 ```
-apt install python3-venv  # on ubuntu or yum if redhat
-pythonon3 -m venv venv
+sudo apt install python3-venv  # on ubuntu or yum if redhat
+python3 -m venv venv
 source venv/bin/activate
 pip install -U pip
-pip install paramiko paramiko pywinrm pylibsshext
+pip install -r requirements.txt
 ```
 
 .env  # Create .env file with your SECRETS.
