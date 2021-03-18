@@ -13,8 +13,8 @@ pip install -r requirements.txt
 
 .env  # Create .env file with your SECRETS.
 ```
-SUMO_USERNAME=
-SUMO_USERPASS=
+SUMO_USERNAME= this is api user from sumo web
+SUMO_USERPASS= this is api secret from sumo web
 WINRM_USERNAME=
 WINRM_USERPASS=
 SSH_USERNAME=
