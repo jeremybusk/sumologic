@@ -3,6 +3,12 @@
 - Manage Data > Collection
 - Dropdown: Show: Stopped Collectors
 
+As administrator this would be a simple remove install assuming X is drive file is on
+```
+C:\"Program Files\Sumo Logic Collector\uninstall.exe" -q -console
+powershell -c  X:\src\sumologic\windows-install-sumologic.ps1
+```
+
 ```
 Invoke-Command -ComputerName remotehost -ScriptBlock {start-service sumo-collector}
 Invoke-Command -ComputerName remotehost -ScriptBlock {get-service sumo-collector | fl *}
