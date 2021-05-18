@@ -6,9 +6,9 @@
 
 Param(
   [Parameter(Mandatory=$true)]
-  [string]$token,
-  [string]$hostname = ($env:computerName).tolower()
+  [string]$token
 )
+# [string]$hostname = ($env:computerName).tolower()
 
 $ErrorActionPreference = "Stop"
 $install_dir="C:\Sum"
