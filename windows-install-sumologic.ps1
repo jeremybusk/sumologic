@@ -7,7 +7,7 @@
 Param(
   [Parameter(Mandatory=$true)]
   [string]$token,
-  # [string]$hostname = ($env:computerName).tolower()
+  [string]$hostname = ($env:computerName).tolower()
 )
 
 $ErrorActionPreference = "Stop"
