@@ -28,7 +28,7 @@ else
 fi
 
 function uninstall_sumologic() {
-  sudo ${pkg_app} remove -y SumoCollector
+  sudo ${pkg_app} remove -y SumoCollector | true
 }
 
 function install_sumologic() {
