@@ -11,11 +11,6 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 if(!$sumotoken){
   $sumotoken = Read-Host "Enter token"
 }
-if($sumouninstall){
-  uninstall
-  write-host "Waiting 30 seconds to make sure sumo has been uninstalled."  # Fix with while checker??
-  sleep 30  # I know this is bad taste but sumo sucketh
-}
 $ErrorActionPreference = "Stop"
 $install_dir="C:\Sum"
 $hostname=((hostname).tolower())
@@ -52,12 +47,17 @@ function test_not_running(){
 }
 
 
-function uninstall(){
+function sumouninstall(){
   C:\Program` Files\Sumo` Logic` Collector\uninstall.exe -q -console
+  write-host "Waiting 30 seconds to make sure sumo has been uninstalled."  # Fix with while checker??
+  sleep 30  # I know this is bad taste but sumo sucketh
 }
 
 
 function main() {
+  if($sumouninstall){
+    sumouninstall
+  }
   test_not_running
   install
 }
