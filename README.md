@@ -17,6 +17,11 @@ powershell -c C:\temp\windows-install-sumologic.ps1
 # powershell -c  X:\src\sumologic\windows-install-sumologic.ps1
 ```
 
+Tail main log file 
+```
+Get-Content -Path 'C:\Program Files\Sumo Logic Collector\logs\collector.log' -wait
+```
+
 ```
 Invoke-Command -ComputerName remotehost -ScriptBlock {start-service sumo-collector}
 Invoke-Command -ComputerName remotehost -ScriptBlock {get-service sumo-collector | fl *}
