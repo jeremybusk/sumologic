@@ -8,10 +8,10 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
   write-host "Must be ran as admin."
   exit 1
 }
-if(!$token){
-  $token = Read-Host "Enter token"
+if(!$sumotoken){
+  $sumotoken = Read-Host "Enter token"
 }
-if($uninstall_sumo){
+if($sumouninstall){
   uninstall
   write-host "Waiting 30 seconds to make sure sumo has been uninstalled."  # Fix with while checker??
   sleep 30  # I know this is bad taste but sumo sucketh
@@ -31,7 +31,7 @@ function install() {
   [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]'Tls12'
   Invoke-WebRequest 'https://collectors.us2.sumologic.com/rest/download/win64' -outfile 'C:\Windows\Temp\SumoCollector.exe'
   Invoke-WebRequest 'https://raw.githubusercontent.com/jeremybusk/sumologic/master/windows_default_sources.json' -outfile "$install_dir\sources.json"
-  C:\Windows\Temp\SumoCollector.exe -console -q -Vclobber=True "-Vsumo.token_and_url=$token" "-Vcollector.name=$hostname" "-Vsources=$install_dir\"
+  C:\Windows\Temp\SumoCollector.exe -console -q -Vclobber=True "-Vsumo.token_and_url=$sumotoken" "-Vcollector.name=$hostname" "-Vsources=$install_dir\"
 }
 
 
