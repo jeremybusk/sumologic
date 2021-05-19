@@ -5,12 +5,11 @@
 - Manage Data > Collection
 - Dropdown: Show: Stopped Collectors
 
-As admin run something like 
+Login to host and as admin run something like 
 ```
 C:\"Program Files\Sumo Logic Collector\uninstall.exe" -q -console
 powershell -c  X:\src\sumologic\windows-install-sumologic.ps1
 ```
-
 
 ```
 Invoke-Command -ComputerName remotehost -ScriptBlock {start-service sumo-collector}

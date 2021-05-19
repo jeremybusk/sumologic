@@ -14,7 +14,7 @@ if(!$token){
 $ErrorActionPreference = "Stop"
 $install_dir="C:\Sum"
 $hostname=((hostname).tolower())
-# $hostname = $hostname + "_events"
+$hostname = $hostname + "_events"
 write-host "$hostname sumo install beginning ..."
 
 
