@@ -11,6 +11,11 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 if(!$token){
   $token = Read-Host "Enter token"
 }
+if($uninstall_sumo){
+  uninstall
+  write-host "Waiting 30 seconds to make sure sumo has been uninstalled."  # Fix with while checker??
+  sleep 30  # I know this is bad taste but sumo sucketh
+}
 $ErrorActionPreference = "Stop"
 $install_dir="C:\Sum"
 $hostname=((hostname).tolower())
@@ -30,7 +35,6 @@ function install() {
 }
 
 
-# Tests
 function test_sumo_collector_service_not_running() {
   if ((get-service -name sumo-collector).status -ne "Running") {
     write-host "ERROR: Serivce is not running. Install appears to have failed."

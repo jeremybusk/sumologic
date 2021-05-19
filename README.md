@@ -7,8 +7,14 @@
 
 Login to host and as admin run something like 
 ```
-C:\"Program Files\Sumo Logic Collector\uninstall.exe" -q -console
-powershell -c  X:\src\sumologic\windows-install-sumologic.ps1
+[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]'Tls12'
+Invoke-WebRequest https://raw.githubusercontent.com/jeremybusk/sumologic/master/windows-install-sumologic.ps1 -outfile 'C:\temp\windows-install-sumologic.ps1'
+
+$token = "mysecret"
+$uninstall_sumo
+powershell -c C:\temp\windows-install-sumologic.ps1 
+# C:\"Program Files\Sumo Logic Collector\uninstall.exe" -q -console
+# powershell -c  X:\src\sumologic\windows-install-sumologic.ps1
 ```
 
 ```
