@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 
 import dns.resolver
 
-logfile = "app.log" 
+logfile = "app.log"
 
 
 def get_tcp_port_rsp_time(host, port):
@@ -28,10 +28,11 @@ def get_dnstime(fqdn):
     resolver = dns.resolver.Resolver(configure=False)
     resolver.nameservers = ['8.8.8.8', '8.8.4.4', '1.1.1.1']
     try:
-        dns_response = resolver.resolve(fqdn, 'A')
+        resolver.resolve(fqdn, 'A')
         dns_time = time.time() - dns_start
-    except:
-        dns_time = None 
+    except Exception as e:
+        print(e)
+        dns_time = None
     return dns_time
 
 
@@ -42,12 +43,12 @@ while True:
     fqdn = urlparse(url).hostname
     msg = {}
     msg['dns_time'] = get_dnstime(fqdn)
-    msg['host'] = fqdn 
+    msg['host'] = fqdn
     msg['port'] = 443
     rsp_time = get_tcp_port_rsp_time(msg['host'], msg['port'])
-    msg['rsp_time'] = rsp_time 
-    msg['tag'] = "feefiifoo" 
-    msg['ts'] = ts 
+    msg['rsp_time'] = rsp_time
+    msg['tag'] = "feefiifoo"
+    msg['ts'] = ts
     print(msg)
     with open(logfile, 'a') as f:
         f.write(f"{msg}\n")
