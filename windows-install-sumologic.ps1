@@ -2,18 +2,20 @@
 # https://help.sumologic.com/03Send-Data/Installed-Collectors/05Reference-Information-for-Collector-Installation/04Add_a_Collector_to_a_Windows_Machine_Image
 # Usage: ./windows-install-sumologic.ps1 -t <my secret token>
 # Uninstall: C:\Program Files\Sumo Logic Collector\uninstall.exe -q -console
+# C:\"Program Files\Sumo Logic Collector\uninstall.exe" -q -console
 
-
-Param(
-  [Parameter(Mandatory=$true)]
-  [string]$token,
-  [string]$hostname = ($env:computerName).tolower()
-)
-
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+  write-host "Must be ran as admin."
+  exit 1
+}
+if(!$token){
+  $token = Read-Host "Enter token"
+}
 $ErrorActionPreference = "Stop"
 $install_dir="C:\Sum"
 $hostname=((hostname).tolower())
-# $token="yoursecrettokenfromsumo"
+# $hostname = $hostname + "_events"
+write-host "$hostname sumo install beginning ..."
 
 
 function install() {
@@ -24,7 +26,7 @@ function install() {
   [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]'Tls12'
   Invoke-WebRequest 'https://collectors.us2.sumologic.com/rest/download/win64' -outfile 'C:\Windows\Temp\SumoCollector.exe'
   Invoke-WebRequest 'https://raw.githubusercontent.com/jeremybusk/sumologic/master/windows_default_sources.json' -outfile "$install_dir\sources.json"
-  C:\Windows\Temp\SumoCollector.exe -console -q -Vclobber=True "-Vsumo.token_and_url=$token" "-Vcollector.name=$hostname_events" "-Vsources=$install_dir\"
+  C:\Windows\Temp\SumoCollector.exe -console -q -Vclobber=True "-Vsumo.token_and_url=$token" "-Vcollector.name=$hostname" "-Vsources=$install_dir\"
 }
 
 
@@ -45,9 +47,11 @@ function test_not_running(){
   }
 }
 
+
 function uninstall(){
   C:\Program` Files\Sumo` Logic` Collector\uninstall.exe -q -console
 }
+
 
 function main() {
   test_not_running

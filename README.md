@@ -1,7 +1,16 @@
+
+
 # Fix Collectors Windows
 - sumologic.com
 - Manage Data > Collection
 - Dropdown: Show: Stopped Collectors
+
+As admin run something like 
+```
+C:\"Program Files\Sumo Logic Collector\uninstall.exe" -q -console
+powershell -c  X:\src\sumologic\windows-install-sumologic.ps1
+```
+
 
 ```
 Invoke-Command -ComputerName remotehost -ScriptBlock {start-service sumo-collector}
@@ -39,3 +48,16 @@ url=https://collectors.sumologic.com
 token=SUMOXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 ```
 systemctl restart collector
+
+Very chatty escalation
+```
+function escalate_to_admin(){
+  if (-Not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')) {
+    if ([int](Get-CimInstance -Class Win32_OperatingSystem | Select-Object -ExpandProperty BuildNumber) -ge 6000) {
+      $CommandLine = "-File `"" + $MyInvocation.MyCommand.Path + "`" " + $MyInvocation.UnboundArguments
+      Start-Process -FilePath PowerShell.exe -Verb Runas -ArgumentList $CommandLine
+      Exit
+    }
+  }
+}
+```
