@@ -5,6 +5,11 @@
 - Manage Data > Collection
 - Dropdown: Show: Stopped Collectors
 
+# Fix restart Using sc.exe
+```
+$sumohost = "myhostname"; Invoke-Command -ComputerName $sumohost -ScriptBlock { sc.exe failure sumo-collector reset=3600 actions= restart/30000 }
+```
+
 Login to host and as admin run something like 
 ```
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]'Tls12'
