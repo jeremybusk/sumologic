@@ -1,20 +1,23 @@
+#!/usr/bin/env python3
 from difflib import SequenceMatcher
 import requests
 from requests.auth import HTTPBasicAuth
 import urllib3
 
+from decouple import config
 from vmware.vapi.vsphere.client import create_vsphere_client
 from sumologic import SumoLogic
+import sys
 
 
 # Vsphere
-vc_username = ""
-vc_userpass = ""
-vsphere1_host = ''
-vsphere2_host = ''
+vc_username = config('VC_USERNAME') 
+vc_userpass = config('VC_USERPASS') 
+vsphere1_host = config('VSPHERE1_HOST') 
+vsphere2_host = config('VSPHERE2_HOST') 
 # Sumo
-sumo_access_id = ""
-sumo_access_key = ""
+sumo_access_id = config('SUMO_ACCESS_ID') 
+sumo_access_key = config('SUMO_ACCESS_KEY') 
 
 
 sumo = SumoLogic(sumo_access_id, sumo_access_key)
