@@ -7,6 +7,12 @@ sudo systemctl status collector
 ```
 This will uninstall/update old collector and Vsources must be in .json format and enabled on cloud item
 
+# Windows
+- https://help.sumologic.com/03Send-Data/Installed-Collectors/03Install-a-Collector-on-Windows
+```
+SumoCollector.exe -console -q "-Vsumo.token_and_url=<installationToken>" "-Vsources=<filepath>"
+```
+
 
 # Fix Collectors Windows
 - sumologic.com
