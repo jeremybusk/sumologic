@@ -1,3 +1,10 @@
+# Linux
+```
+cd /tmp/
+wget "https://collectors.sumologic.com/rest/download/linux/64" -O SumoCollector.sh && chmod +x
+sudo ./SumoCollector.sh -q -Vsumo.token_and_url=<url install token> -Vsources=/opt/sumo
+```
+This will uninstall/update old collector and Vsources must be in .json format and enabled on cloud item
 
 
 # Fix Collectors Windows
