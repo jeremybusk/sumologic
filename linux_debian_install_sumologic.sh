@@ -1,4 +1,5 @@
 set -e
+# /opt/SumoCollector/uninstall -q -console
 
 sdir=$(pwd)
 token=$SUMO_TOKEN
