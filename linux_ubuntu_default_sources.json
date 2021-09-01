@@ -3,7 +3,6 @@
   "sources":[{
     "name":"Auth-Log",
     "category":"/var/log/auth",
-    "hostName":"myhost",
     "automaticDateParsing":true,
     "multilineProcessingEnabled":true,
     "useAutolineMatching":true,
@@ -20,7 +19,6 @@
   {
     "name":"Cloud-Init-Log",
     "category":"/var/log/cloud-init",
-    "hostName":"myhost",
     "automaticDateParsing":true,
     "multilineProcessingEnabled":true,
     "useAutolineMatching":true,
@@ -37,7 +35,6 @@
   {
     "name":"DPKG-Events",
     "category":"/var/log/dpkg",
-    "hostName":"myhost",
     "automaticDateParsing":true,
     "multilineProcessingEnabled":true,
     "useAutolineMatching":true,
@@ -54,7 +51,6 @@
   {
     "name":"Kernel-Log",
     "category":"/var/log/kernel",
-    "hostName":"myhost",
     "automaticDateParsing":true,
     "multilineProcessingEnabled":true,
     "useAutolineMatching":true,
@@ -71,7 +67,6 @@
   {
     "name":"SysLog-Events",
     "category":"/var/log/syslog",
-    "hostName":"myhost",
     "automaticDateParsing":true,
     "multilineProcessingEnabled":true,
     "useAutolineMatching":true,
