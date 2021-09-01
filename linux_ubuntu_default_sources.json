@@ -49,22 +49,6 @@
     "sourceType":"LocalFile"
   },
   {
-    "name":"Kernel-Log",
-    "category":"/var/log/kernel",
-    "automaticDateParsing":true,
-    "multilineProcessingEnabled":true,
-    "useAutolineMatching":true,
-    "forceTimeZone":false,
-    "filters":[],
-    "cutoffTimestamp":0,
-    "encoding":"UTF-8",
-    "fields":{
-    },
-    "pathExpression":"/var/log/kern.log",
-    "blacklist":[],
-    "sourceType":"LocalFile"
-  },
-  {
     "name":"SysLog-Events",
     "category":"/var/log/syslog",
     "automaticDateParsing":true,
