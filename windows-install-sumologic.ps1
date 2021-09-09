@@ -12,7 +12,7 @@ if(!$sumotoken){
   $sumotoken = Read-Host "Enter token"
 }
 $ErrorActionPreference = "Stop"
-$install_dir="C:\Sum"
+$install_dir="C:\Sumo"
 $hostname=((hostname).tolower())
 $hostname = $hostname + "_events"
 write-host "$hostname sumo install beginning ..."
