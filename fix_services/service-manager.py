@@ -23,6 +23,7 @@ import winrm
 
 from remotecmd_wrapper import RcmdClient
 
+
 def fix_stopped_collectors(url, sumo_access_id, sumo_access_key, username, userpass):
     r = requests.get(url, auth=HTTPBasicAuth(sumo_access_id, sumo_access_key))
     if r.status_code != 200:
@@ -51,7 +52,7 @@ def fix_stopped_collectors(url, sumo_access_id, sumo_access_key, username, userp
             continue
         if "windows" in os.lower():
             print(f"host: {host} alive: {alive} os: {os}")
-            time.sleep(3)
+            # time.sleep(3)
             restart_service_if_stopped(host, username, userpass, "sumo-collector")
         elif "linux" in os.lower():
             print(f"{host} operating system is Linux.")
@@ -172,6 +173,7 @@ def main():
 
     while True:
         fix_stopped_collectors("https://api.us2.sumologic.com/api/v1/collectors", args.sumo_access_id, args.sumo_access_key, args.username, args.password)
+        print(f"Waiting {args.interval_in_seconds} seconds for next loop.")
         time.sleep(args.interval_in_seconds)
 
 

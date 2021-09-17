@@ -9,7 +9,7 @@ paramiko
 pkg-resources
 pycparser
 PyNaCl
-python-decouple=
+python-decouple
 pywinrm
 requests
 requests-ntlm
