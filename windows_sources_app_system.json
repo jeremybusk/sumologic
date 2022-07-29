@@ -1,0 +1,37 @@
+{
+  "api.version":"v1",
+  "sources":[{
+    "name":"$hostname_app_events",
+    "category":"winEvent/Application",
+    "automaticDateParsing":true,
+    "multilineProcessingEnabled":true,
+    "useAutolineMatching":true,
+    "forceTimeZone":false,
+    "filters":[],
+    "cutoffTimestamp":0,
+    "encoding":"UTF-8",
+    "fields":{
+    },
+    "logNames":["Application"],
+    "renderMessages":true,
+    "sidStyle":2,
+    "sourceType":"LocalWindowsEventLog"
+  },
+  {
+    "name":"$hostname_sys_events",
+    "category":"winEvent/System",
+    "automaticDateParsing":true,
+    "multilineProcessingEnabled":true,
+    "useAutolineMatching":true,
+    "forceTimeZone":false,
+    "filters":[],
+    "cutoffTimestamp":0,
+    "encoding":"UTF-8",
+    "fields":{
+    },
+    "logNames":["System"],
+    "renderMessages":true,
+    "sidStyle":2,
+    "sourceType":"LocalWindowsEventLog"
+  }]
+}
