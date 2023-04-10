@@ -1,0 +1,7 @@
+{
+  "query": "_collector=wjp1-sftp",
+  "from": "2023-04-03T12:05:00",
+  "to": "2023-04-03T12:06:00",
+  "timeZone": "MST",
+  "byReceiptTime": true
+}
