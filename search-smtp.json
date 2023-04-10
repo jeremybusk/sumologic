@@ -1,0 +1,7 @@
+{
+  "query": "_dataTier=Infrequent AND _sourceHost=\"foo.example.com\" AND \"SMTP RELAY\" | parse \"Client:*:\" as smtp_client_ip | count_frequent(smtp_client_ip)",
+  "from": "2023-04-04T00:00:00",
+  "to": "2023-04-04T01:00:00",
+  "timeZone": "MST",
+  "byReceiptTime": true
+}
