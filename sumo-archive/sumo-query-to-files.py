@@ -56,12 +56,6 @@ class SumoExporter:
             print(f"Uploading (memory): {upload_url.split('?')[0]}")
         self._upload_to_azure(upload_url, data_bytes, "application/zstd")
 
-    def upload_blob_from_file(self, local_file_path: str):
-        blob_final_name = os.path.basename(local_file_path)
-        upload_url = self._build_azure_blob_url(blob_final_name)
-        with open(local_file_path, "rb") as f_data:
-            self._upload_to_azure(upload_url, f_data, "application/zstd")
-
     def create_job(self, query: str, time_from: str, time_to: str) -> str:
         payload = {"query": query, "from": time_from, "to": time_to, "timeZone": "UTC"}
         response = self.session.post(f"{self.api_endpoint}/api/v1/search/jobs", json=payload)
@@ -81,8 +75,7 @@ class SumoExporter:
                 raise Exception(f"Job {job_id} failed with state: {state}")
             time.sleep(poll_interval)
 
-    def fetch_messages(self, job_id: str, limit_per_request: int = 10000) -> list:
-        all_items = []
+    def stream_messages(self, job_id: str, limit_per_request: int = 10000):
         offset = 0
         job_type = "messages"
         while True:
@@ -92,38 +85,35 @@ class SumoExporter:
             items = resp.json().get(job_type, [])
             if not items:
                 break
-            all_items.extend(items)
+            for item in items:
+                yield item
             offset += len(items)
-        return all_items
 
-    def _message_chunk_generator(self, messages: list, max_mb_per_chunk: int):
-        chunk_size_limit_bytes = max_mb_per_chunk * 1024 * 1024
+    def chunk_and_upload(self, job_id: str, base_filename_prefix: str, max_mb_per_file: int):
+        chunk_size_limit_bytes = max_mb_per_file * 1024 * 1024
         current_chunk_data = []
         current_size = 0
         chunk_num = 1
-        for msg in messages:
+
+        for msg in self.stream_messages(job_id):
             msg_bytes = json.dumps(msg).encode('utf-8')
             if current_size + len(msg_bytes) > chunk_size_limit_bytes and current_chunk_data:
-                yield chunk_num, current_chunk_data
+                self._compress_and_upload_chunk(current_chunk_data, base_filename_prefix, chunk_num)
                 chunk_num += 1
                 current_chunk_data = []
                 current_size = 0
             current_chunk_data.append(msg)
             current_size += len(msg_bytes)
-        if current_chunk_data:
-            yield chunk_num, current_chunk_data
 
-    def write_messages_to_zstd_files(self, messages: list, base_filename_prefix: str, max_mb_per_file: int) -> list:
-        output_files = []
-        for chunk_idx, chunk_data in self._message_chunk_generator(messages, max_mb_per_file):
-            filename = f"{base_filename_prefix}_part{chunk_idx}.json.zst"
-            json_bytes = json.dumps(chunk_data, indent=2).encode("utf-8")
-            with open(filename, "wb") as f:
-                cctx = zstd.ZstdCompressor()
-                f.write(cctx.compress(json_bytes))
-            output_files.append(filename)
-            print(f"✅ Wrote {filename}")
-        return output_files
+        if current_chunk_data:
+            self._compress_and_upload_chunk(current_chunk_data, base_filename_prefix, chunk_num)
+
+    def _compress_and_upload_chunk(self, chunk_data, prefix, idx):
+        json_bytes = json.dumps(chunk_data, indent=2).encode("utf-8")
+        cctx = zstd.ZstdCompressor()
+        zstd_bytes = cctx.compress(json_bytes)
+        blob_name = f"{prefix}_part{idx}.json.zst"
+        self.upload_blob_from_memory(zstd_bytes, blob_name)
 
 
 def must_env(key):
@@ -155,18 +145,12 @@ def main():
     exp = SumoExporter(access_id, access_key, endpoint, sas_url, "sumo-archive", verbose=True)
     job_id = exp.create_job(args.query, from_time, to_time)
     exp.wait_for_completion(job_id)
-    messages = exp.fetch_messages(job_id)
 
     if args.upload:
-        for idx, chunk in exp._message_chunk_generator(messages, args.max_size):
-            json_bytes = json.dumps(chunk, indent=2).encode("utf-8")
-            cctx = zstd.ZstdCompressor()
-            zstd_bytes = cctx.compress(json_bytes)
-            blob_name = f"{args.prefix}_part{idx}.json.zst"
-            exp.upload_blob_from_memory(zstd_bytes, blob_name)
+        exp.chunk_and_upload(job_id, args.prefix, args.max_size)
     else:
-        exp.write_messages_to_zstd_files(messages, args.prefix, args.max_size)
+        print("❌ Only streaming upload is supported in memory-efficient mode. Add --upload flag.")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
-
