@@ -66,3 +66,13 @@ You can use sha1 hashes for files in read-only or signed file to verify they hav
 You can encrypt the json.zst to json.zst.enc files with very long key for universal portability.
 
 Encryption will increase time & resource usage to retrieve.
+
+# Cost Savings
+
+Use an Azure Container Instance in same region as blob storage account.
+
+Spin Azure Container Instance up only when needed.
+
+Make sure you have enough RAM to support in-memory options for max file sizes.
+
+Azure Function App is another option where you only pay when used.
