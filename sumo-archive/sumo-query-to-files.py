@@ -75,38 +75,57 @@ class SumoExporter:
                 raise Exception(f"Job {job_id} failed with state: {state}")
             time.sleep(poll_interval)
 
-    def stream_messages(self, job_id: str, limit_per_request: int = 10000):
-        offset = 0
+    def stream_messages(self, job_id: str, limit_per_request: int = 10000, resume_offset: int = 0):
+        offset = resume_offset
         job_type = "messages"
         while True:
-            url = f"{self.api_endpoint}/api/v1/search/jobs/{job_id}/{job_type}?limit={limit_per_request}&offset={offset}"
-            resp = self.session.get(url)
-            resp.raise_for_status()
-            items = resp.json().get(job_type, [])
-            if not items:
-                break
-            for item in items:
-                yield item
-            offset += len(items)
+            try:
+                url = f"{self.api_endpoint}/api/v1/search/jobs/{job_id}/{job_type}?limit={limit_per_request}&offset={offset}"
+                resp = self.session.get(url)
+                resp.raise_for_status()
+                items = resp.json().get(job_type, [])
+                if not items:
+                    break
+                for item in items:
+                    yield item
+                offset += len(items)
+            except requests.exceptions.RequestException as e:
+                print(f"⚠️ Network error: {e}. Retrying in 5s...")
+                time.sleep(5)
+                continue
 
     def chunk_and_upload(self, job_id: str, base_filename_prefix: str, max_mb_per_file: int):
         chunk_size_limit_bytes = max_mb_per_file * 1024 * 1024
         current_chunk_data = []
         current_size = 0
         chunk_num = 1
+        resume_file = f"{base_filename_prefix}.resume"
 
-        for msg in self.stream_messages(job_id):
+        if os.path.exists(resume_file):
+            with open(resume_file) as f:
+                resume_info = json.load(f)
+                offset = resume_info.get("offset", 0)
+                chunk_num = resume_info.get("chunk_num", 1)
+        else:
+            offset = 0
+
+        for msg in self.stream_messages(job_id, resume_offset=offset):
             msg_bytes = json.dumps(msg).encode('utf-8')
             if current_size + len(msg_bytes) > chunk_size_limit_bytes and current_chunk_data:
                 self._compress_and_upload_chunk(current_chunk_data, base_filename_prefix, chunk_num)
                 chunk_num += 1
                 current_chunk_data = []
                 current_size = 0
+                with open(resume_file, "w") as f:
+                    json.dump({"offset": offset, "chunk_num": chunk_num}, f)
             current_chunk_data.append(msg)
             current_size += len(msg_bytes)
+            offset += 1
 
         if current_chunk_data:
             self._compress_and_upload_chunk(current_chunk_data, base_filename_prefix, chunk_num)
+            if os.path.exists(resume_file):
+                os.remove(resume_file)
 
     def _compress_and_upload_chunk(self, chunk_data, prefix, idx):
         json_bytes = json.dumps(chunk_data, indent=2).encode("utf-8")
@@ -154,3 +173,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
