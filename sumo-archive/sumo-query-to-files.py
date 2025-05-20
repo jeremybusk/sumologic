@@ -5,6 +5,7 @@ import json
 import time
 import logging
 import calendar
+import random
 import requests
 import zstandard as zstd
 from datetime import datetime, timedelta, timezone
@@ -37,7 +38,6 @@ class SumoExporter:
         from urllib.parse import urlparse
         import posixpath
 
-        # Compress using Zstandard
         cctx = zstd.ZstdCompressor()
         compressed_bytes = cctx.compress(data_bytes)
 
@@ -60,7 +60,8 @@ class SumoExporter:
                 resp = self.session.post(url, json=payload)
                 if resp.status_code == 429:
                     logging.warning(f"Rate limit hit on create_job: {url}")
-                    time.sleep(5)
+                    time.sleep(random.randint(5, 10))
+                    # random.randint(5, 10)
                     return self.create_job(query, time_from, time_to)
                 resp.raise_for_status()
                 return resp.json()["id"]
@@ -75,7 +76,7 @@ class SumoExporter:
                 resp = self.session.get(url)
                 if resp.status_code == 429:
                     logging.warning(f"Rate limit hit on wait_for_completion: {url}")
-                    time.sleep(5)
+                    time.sleep(random.randint(5, 10))
                     continue
                 resp.raise_for_status()
                 data = resp.json()
@@ -98,7 +99,7 @@ class SumoExporter:
                 resp = self.session.get(url, params=params)
                 if resp.status_code == 429:
                     logging.warning(f"Rate limit hit on stream_messages: {url}")
-                    time.sleep(5)
+                    time.sleep(random.randint(5, 10))
                     continue
                 resp.raise_for_status()
                 data = resp.json()
@@ -129,12 +130,25 @@ def generate_ranges(start, end, step):
         yield current, min(next_time, end)
         current = next_time
 
-def process_and_return(exp, query, start, end, args):
-    logging.info(f"🔄 Querying: {start} → {end}")
+def process_and_return(exp, query, start, end, args, depth=0):
+    indent = "  " * depth
+    logging.info(f"{indent}🔄 Querying: {start} → {end}")
     job_id = exp.create_job(query, start.isoformat(), end.isoformat())
     exp.wait_for_completion(job_id)
     data = list(exp.stream_messages(job_id, max_messages=args.max_messages))
-    logging.info(f"📥 Retrieved: {len(data)} records")
+    logging.info(f"{indent}📥 Retrieved: {len(data)} records")
+
+    if len(data) >= args.max_messages and (end - start) > timedelta(minutes=1):
+        logging.warning(f"{indent}⚠️ Hit message cap in range {start}–{end}. Auto-splitting smaller.")
+        substep = timedelta(minutes=1)
+        subranges = list(generate_ranges(start, end, substep))
+        subdata = []
+        with ThreadPoolExecutor(max_workers=args.concurrent_workers) as executor:
+            futures = [executor.submit(process_and_return, exp, query, s, e, args, depth + 1) for s, e in subranges]
+            for f in as_completed(futures):
+                subdata.extend(f.result())
+        return subdata
+
     return data
 
 def process_parallel_merge(exp, query, start, end, suffix, args, step):
@@ -179,7 +193,7 @@ def main():
     parser.add_argument("--max-messages", type=int, default=100000)
     parser.add_argument("--upload", action="store_true", help="Upload to Azure Blob using AZURE_BLOB_SAS")
     parser.add_argument("--breakup-blobs-by", choices=["month", "day", "hour"], default="month")
-    # parser.add_argument("--blob-container_name", default="sumo-archive", help="Container blobs will be uploaded to")
+    parser.add_argument("--hourly-initial-chunk-minutes", type=int, default=5, help="Initial chunk size in minutes for hour-level exports")
     args = parser.parse_args()
 
     access_id = must_env("SUMO_ACCESS_ID")
@@ -217,8 +231,8 @@ def main():
                 for day_start, day_end in generate_ranges(month_start, month_end + timedelta(seconds=1), timedelta(days=1)):
                     for hour_start, hour_end in generate_ranges(day_start, day_end, timedelta(hours=1)):
                         suffix = f"{year}{month_abbr}{hour_start.day:02}H{hour_start.hour:02}"
-                        process_parallel_merge(exp, args.query, hour_start, hour_end, suffix, args, step=timedelta(minutes=5))
+                        step = timedelta(minutes=args.hourly_initial_chunk_minutes)
+                        process_parallel_merge(exp, args.query, hour_start, hour_end, suffix, args, step=step)
 
 if __name__ == "__main__":
     main()
-
