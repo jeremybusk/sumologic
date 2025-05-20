@@ -3,15 +3,23 @@ import os
 import sys
 import json
 import time
+import logging
+import calendar
 import requests
 import zstandard as zstd
-from io import BytesIO
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse
-import posixpath
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Semaphore
+
+log_file = "sumo-query-to-files.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(message)s',
+    handlers=[logging.FileHandler(log_file), logging.StreamHandler(sys.stdout)]
+)
 
 class SumoExporter:
-    def __init__(self, access_id, access_key, api_endpoint, sas_url=None, azure_container_path=None, verbose=None):
+    def __init__(self, access_id, access_key, api_endpoint, sas_url=None, azure_container_path=None, verbose=None, rate_limit=4):
         self.access_id = access_id
         self.access_key = access_key
         self.api_endpoint = api_endpoint.rstrip('/')
@@ -21,119 +29,91 @@ class SumoExporter:
         self.session.headers.update({"Content-Type": "application/json", "Accept": "application/json"})
         self.azure_container_path = azure_container_path or ""
         self.verbose = verbose
-
-    @staticmethod
-    def sanitize(s: str) -> str:
-        invalid_chars_map = str.maketrans({
-            " ": "_", "\"": "", "'": "", "=": "_", "\\": "_", "?": "_",
-            "<": "_", ">": "_", ":": "_", "*": "_", "|": "_", "/": "_"
-        })
-        return str(s).translate(invalid_chars_map)
-
-    def _upload_to_azure(self, upload_url: str, data_source: bytes or BytesIO, content_type: str):
-        if self.verbose:
-            max_url_len = 150
-            display_url = upload_url[:max_url_len] + '...' if len(upload_url) > max_url_len else upload_url
-            print(f"Uploading to: {display_url}")
-
-        resp = requests.put(upload_url, headers={
-            "x-ms-blob-type": "BlockBlob",
-            "Content-Type": content_type
-        }, data=data_source)
-        resp.raise_for_status()
-        print(f"✅ Uploaded to Azure: {upload_url.split('?')[0]}")
-
-    def _build_azure_blob_url(self, blob_name_in_container: str) -> str:
-        if not self.sas_url:
-            raise ValueError("AZURE_BLOB_SAS is not set.")
-        parsed_sas = urlparse(self.sas_url)
-        target_blob_full_path = posixpath.join(self.azure_container_path, blob_name_in_container)
-        return f"{parsed_sas.scheme}://{parsed_sas.netloc}/{target_blob_full_path.lstrip('/')}?{parsed_sas.query}"
+        self.semaphore = Semaphore(rate_limit)
 
     def upload_blob_from_memory(self, data_bytes: bytes, blob_name: str):
-        upload_url = self._build_azure_blob_url(blob_name)
-        if self.verbose:
-            print(f"Uploading (memory): {upload_url.split('?')[0]}")
-        self._upload_to_azure(upload_url, data_bytes, "application/zstd")
+        if not self.sas_url:
+            raise ValueError("AZURE_BLOB_SAS must be set for upload.")
+        from urllib.parse import urlparse
+        import posixpath
+
+        # Compress using Zstandard
+        cctx = zstd.ZstdCompressor()
+        compressed_bytes = cctx.compress(data_bytes)
+
+        parsed = urlparse(self.sas_url)
+        upload_url = f"{parsed.scheme}://{parsed.netloc}/{posixpath.join(self.azure_container_path, blob_name).lstrip('/')}?{parsed.query}"
+        headers = {
+            "x-ms-blob-type": "BlockBlob",
+            "Content-Type": "application/zstd"
+        }
+
+        resp = requests.put(upload_url, headers=headers, data=compressed_bytes)
+        resp.raise_for_status()
+        logging.info(f"✅ Uploaded to Azure Blob: {upload_url.split('?')[0]}")
 
     def create_job(self, query: str, time_from: str, time_to: str) -> str:
-        payload = {"query": query, "from": time_from, "to": time_to, "timeZone": "UTC"}
-        response = self.session.post(f"{self.api_endpoint}/api/v1/search/jobs", json=payload)
-        response.raise_for_status()
-        return response.json()["id"]
+        with self.semaphore:
+            payload = {"query": query, "from": time_from, "to": time_to, "timeZone": "UTC"}
+            url = f"{self.api_endpoint}/api/v1/search/jobs"
+            try:
+                resp = self.session.post(url, json=payload)
+                if resp.status_code == 429:
+                    logging.warning(f"Rate limit hit on create_job: {url}")
+                    time.sleep(5)
+                    return self.create_job(query, time_from, time_to)
+                resp.raise_for_status()
+                return resp.json()["id"]
+            except requests.exceptions.RequestException as e:
+                logging.error(f"create_job error: {e}")
+                raise
 
     def wait_for_completion(self, job_id: str, poll_interval: int = 5):
-        status_url = f"{self.api_endpoint}/api/v1/search/jobs/{job_id}"
-        while True:
-            response = self.session.get(status_url)
-            response.raise_for_status()
-            data = response.json()
-            state = data.get("state")
-            if state == "DONE GATHERING RESULTS":
-                return
-            elif state in ["CANCELLED", "FAILED"]:
-                raise Exception(f"Job {job_id} failed with state: {state}")
-            time.sleep(poll_interval)
-
-    def stream_messages(self, job_id: str, limit_per_request: int = 10000, resume_offset: int = 0):
-        offset = resume_offset
-        job_type = "messages"
+        url = f"{self.api_endpoint}/api/v1/search/jobs/{job_id}"
         while True:
             try:
-                url = f"{self.api_endpoint}/api/v1/search/jobs/{job_id}/{job_type}?limit={limit_per_request}&offset={offset}"
                 resp = self.session.get(url)
+                if resp.status_code == 429:
+                    logging.warning(f"Rate limit hit on wait_for_completion: {url}")
+                    time.sleep(5)
+                    continue
                 resp.raise_for_status()
-                items = resp.json().get(job_type, [])
+                data = resp.json()
+                if data.get("state") == "DONE GATHERING RESULTS":
+                    return
+                elif data.get("state") in ["CANCELLED", "FAILED"]:
+                    raise Exception(f"Job {job_id} failed with state: {data['state']}")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"wait_for_completion error: {e}")
+                raise
+            time.sleep(poll_interval)
+
+    def stream_messages(self, job_id: str, limit_per_request: int = 10000, max_messages: int = 100000):
+        offset = 0
+        total = 0
+        while True:
+            params = {"limit": limit_per_request, "offset": offset}
+            url = f"{self.api_endpoint}/api/v1/search/jobs/{job_id}/messages"
+            try:
+                resp = self.session.get(url, params=params)
+                if resp.status_code == 429:
+                    logging.warning(f"Rate limit hit on stream_messages: {url}")
+                    time.sleep(5)
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                items = data.get("messages", [])
                 if not items:
                     break
                 for item in items:
                     yield item
                 offset += len(items)
+                total += len(items)
+                if len(items) < limit_per_request or total >= max_messages:
+                    break
             except requests.exceptions.RequestException as e:
-                print(f"⚠️ Network error: {e}. Retrying in 5s...")
-                time.sleep(5)
-                continue
-
-    def chunk_and_upload(self, job_id: str, base_filename_prefix: str, max_mb_per_file: int):
-        chunk_size_limit_bytes = max_mb_per_file * 1024 * 1024
-        current_chunk_data = []
-        current_size = 0
-        chunk_num = 1
-        resume_file = f"{base_filename_prefix}.resume"
-
-        if os.path.exists(resume_file):
-            with open(resume_file) as f:
-                resume_info = json.load(f)
-                offset = resume_info.get("offset", 0)
-                chunk_num = resume_info.get("chunk_num", 1)
-        else:
-            offset = 0
-
-        for msg in self.stream_messages(job_id, resume_offset=offset):
-            msg_bytes = json.dumps(msg).encode('utf-8')
-            if current_size + len(msg_bytes) > chunk_size_limit_bytes and current_chunk_data:
-                self._compress_and_upload_chunk(current_chunk_data, base_filename_prefix, chunk_num)
-                chunk_num += 1
-                current_chunk_data = []
-                current_size = 0
-                with open(resume_file, "w") as f:
-                    json.dump({"offset": offset, "chunk_num": chunk_num}, f)
-            current_chunk_data.append(msg)
-            current_size += len(msg_bytes)
-            offset += 1
-
-        if current_chunk_data:
-            self._compress_and_upload_chunk(current_chunk_data, base_filename_prefix, chunk_num)
-            if os.path.exists(resume_file):
-                os.remove(resume_file)
-
-    def _compress_and_upload_chunk(self, chunk_data, prefix, idx):
-        json_bytes = json.dumps(chunk_data, indent=2).encode("utf-8")
-        cctx = zstd.ZstdCompressor()
-        zstd_bytes = cctx.compress(json_bytes)
-        blob_name = f"{prefix}_part{idx}.json.zst"
-        self.upload_blob_from_memory(zstd_bytes, blob_name)
-
+                logging.error(f"stream_messages error: {e}")
+                raise
 
 def must_env(key):
     val = os.getenv(key)
@@ -142,34 +122,102 @@ def must_env(key):
         sys.exit(1)
     return val
 
+def generate_ranges(start, end, step):
+    current = start
+    while current < end:
+        next_time = current + step
+        yield current, min(next_time, end)
+        current = next_time
+
+def process_and_return(exp, query, start, end, args):
+    logging.info(f"🔄 Querying: {start} → {end}")
+    job_id = exp.create_job(query, start.isoformat(), end.isoformat())
+    exp.wait_for_completion(job_id)
+    data = list(exp.stream_messages(job_id, max_messages=args.max_messages))
+    logging.info(f"📥 Retrieved: {len(data)} records")
+    return data
+
+def process_parallel_merge(exp, query, start, end, suffix, args, step):
+    ranges = list(generate_ranges(start, end, step))
+    all_data = []
+    with ThreadPoolExecutor(max_workers=args.concurrent_workers) as executor:
+        futures = [executor.submit(process_and_return, exp, query, s, e, args) for s, e in ranges]
+        for f in as_completed(futures):
+            all_data.extend(f.result())
+
+    all_data.sort(key=lambda m: int(m.get("map", {}).get("_messagetime", 0)))
+    json_bytes = json.dumps(all_data, indent=2).encode("utf-8")
+
+    if args.local_file_output:
+        local_file = f"{args.prefix}_{suffix}.json.zst"
+        with open(local_file, "wb") as f:
+            cctx = zstd.ZstdCompressor()
+            f.write(cctx.compress(json_bytes))
+        logging.info(f"💾 Saved: {local_file}")
+
+    if args.upload:
+        blob_name = f"{args.prefix}_{suffix}.json.zst"
+        exp.upload_blob_from_memory(json_bytes, blob_name)
+
+def ensure_directory_exists(file_path):
+    directory_path = os.path.dirname(file_path)
+    if directory_path:
+        os.makedirs(directory_path, exist_ok=True)
+        print(f"📁 Directory ensured: {directory_path}")
+    return directory_path
+
 def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--query", required=True)
-    parser.add_argument("--from", dest="from_time")
-    parser.add_argument("--to", dest="to_time")
-    parser.add_argument("--upload", action="store_true")
-    parser.add_argument("--max-size", type=int, default=1000)
+    parser.add_argument("--years", nargs="+", type=int, required=True)
+    parser.add_argument("--months", nargs="+", help="3-letter month abbreviations like Jan Feb Mar")
+    parser.add_argument("--local-file-output", action="store_true")
     parser.add_argument("--prefix", default="sumo_export")
+    parser.add_argument("--concurrent-workers", type=int, default=4)
+    parser.add_argument("--rate-limit", type=int, default=4)
+    parser.add_argument("--max-messages", type=int, default=100000)
+    parser.add_argument("--upload", action="store_true", help="Upload to Azure Blob using AZURE_BLOB_SAS")
+    parser.add_argument("--breakup-blobs-by", choices=["month", "day", "hour"], default="month")
+    # parser.add_argument("--blob-container_name", default="sumo-archive", help="Container blobs will be uploaded to")
     args = parser.parse_args()
 
     access_id = must_env("SUMO_ACCESS_ID")
     access_key = must_env("SUMO_ACCESS_KEY")
     endpoint = must_env("SUMO_API_ENDPOINT")
-    sas_url = os.getenv("AZURE_BLOB_SAS")
 
-    to_time = args.to_time or datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    from_time = args.from_time or (datetime.now(timezone.utc) - timedelta(minutes=15)).replace(microsecond=0).isoformat()
+    local_directory_path = ensure_directory_exists(args.prefix)
 
-    exp = SumoExporter(access_id, access_key, endpoint, sas_url, "sumo-archive", verbose=True)
-    job_id = exp.create_job(args.query, from_time, to_time)
-    exp.wait_for_completion(job_id)
+    exp = SumoExporter(
+        access_id, access_key, endpoint,
+        os.getenv("AZURE_BLOB_SAS"),
+        verbose=True,
+        rate_limit=args.rate_limit
+    )
 
-    if args.upload:
-        exp.chunk_and_upload(job_id, args.prefix, args.max_size)
-    else:
-        print("❌ Only streaming upload is supported in memory-efficient mode. Add --upload flag.")
-        sys.exit(1)
+    for year in args.years:
+        for month in range(1, 13):
+            month_abbr = calendar.month_abbr[month]
+            if args.months and month_abbr not in args.months:
+                continue
+            month_start = datetime(year, month, 1, tzinfo=timezone.utc)
+            days_in_month = calendar.monthrange(year, month)[1]
+            month_end = datetime(year, month, days_in_month, 23, 59, 59, tzinfo=timezone.utc)
+
+            if args.breakup_blobs_by == "month":
+                suffix = f"{year}{month_abbr}"
+                process_parallel_merge(exp, args.query, month_start, month_end, suffix, args, step=timedelta(days=1))
+
+            elif args.breakup_blobs_by == "day":
+                for day_start, day_end in generate_ranges(month_start, month_end + timedelta(seconds=1), timedelta(days=1)):
+                    suffix = f"{year}{month_abbr}{day_start.day:02}"
+                    process_parallel_merge(exp, args.query, day_start, day_end, suffix, args, step=timedelta(hours=1))
+
+            elif args.breakup_blobs_by == "hour":
+                for day_start, day_end in generate_ranges(month_start, month_end + timedelta(seconds=1), timedelta(days=1)):
+                    for hour_start, hour_end in generate_ranges(day_start, day_end, timedelta(hours=1)):
+                        suffix = f"{year}{month_abbr}{hour_start.day:02}H{hour_start.hour:02}"
+                        process_parallel_merge(exp, args.query, hour_start, hour_end, suffix, args, step=timedelta(minutes=5))
 
 if __name__ == "__main__":
     main()
