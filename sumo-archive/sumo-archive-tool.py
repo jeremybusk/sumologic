@@ -46,7 +46,23 @@ def report_missing(container, prefix, years, months):
                         continue
                     parts = file.split("_")[-1].replace(".json.zst", "")
                     if "H" in parts:
-                        day_str, hour_str = parts.split("H")
+                        # jtest
+                        # day_str, hour_str = parts.split("H")
+                        import re
+                        match = re.match(r"(\d{4}[A-Za-z]{3}\d{2})(?:H(\d{2})(?:M(\d{2}))?)?", parts)
+                        if not match:
+                            continue
+
+                        day_str, hour_str, minute_str = match.groups()
+                        day = int(day_str[-2:])
+                        found_days.add(day)
+                        if hour_str:
+                            hour = int(hour_str)
+                            found_hours[day].add(hour)
+                            if minute_str:
+                                minute = int(minute_str)
+                                found_minutes[day][hour].add(minute)
+
                         day = int(day_str[-2:])
                         hour = int(hour_str[:2])
                         found_days.add(day)
@@ -117,4 +133,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
