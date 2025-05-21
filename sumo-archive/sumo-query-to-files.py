@@ -229,7 +229,7 @@ def main():
     parser.add_argument("--rate-limit", type=int, default=4)
     parser.add_argument("--max-messages", type=int, default=100000)
     parser.add_argument("--upload", action="store_true")
-    parser.add_argument("--query-by", choices=["month", "day", "hour", "minute"], default="month")
+    parser.add_argument("--initial-query-by-minutes", type=int, default=43200, help="Initial query chunk size in minutes (e.g. 43200 = 30 days)")
     parser.add_argument("--files-stored-by", choices=["month", "day", "hour", "minute"], default="month")
     parser.add_argument("--poll-initial-delay", type=int, default=5)
     parser.add_argument("--skip-if-archive-exists", action="store_true")
@@ -246,43 +246,28 @@ def main():
 
     with ThreadPoolExecutor(max_workers=args.rate_limit) as executor:
         futures = []
+
+        chunk_minutes = args.initial_query_by_minutes
+        chunk_delta = timedelta(minutes=chunk_minutes)
         for year in args.years:
             for month in range(1, 13):
                 month_abbr = calendar.month_abbr[month]
                 if args.months and month_abbr not in args.months:
                     continue
+
                 days_in_month = calendar.monthrange(year, month)[1]
                 selected_days = args.days if args.days else range(1, days_in_month + 1)
 
                 for day in selected_days:
-                    if args.query_by == "month":
-                        start = datetime(year, month, 1, tzinfo=timezone.utc)
-                        end = datetime(year, month, days_in_month, 23, 59, 59, tzinfo=timezone.utc)
-                        suffix = f"{year}{month_abbr}"
-                        futures.append(executor.submit(query_and_export, exp, args, args.query, start, end, suffix, year, month_abbr))
-                        break
-
-                    for hour in range(24):
-                        if args.query_by == "day":
-                            start = datetime(year, month, day, 0, 0, tzinfo=timezone.utc)
-                            end = datetime(year, month, day, 23, 59, 59, tzinfo=timezone.utc)
-                            suffix = f"{year}{month_abbr}{day:02}"
-                            futures.append(executor.submit(query_and_export, exp, args, args.query, start, end, suffix, year, month_abbr, day))
-                            break
-
-                        for minute in range(60):
-                            if args.query_by == "hour":
-                                start = datetime(year, month, day, hour, 0, tzinfo=timezone.utc)
-                                end = datetime(year, month, day, hour, 59, 59, tzinfo=timezone.utc)
-                                suffix = f"{year}{month_abbr}{day:02}H{hour:02}"
-                                futures.append(executor.submit(query_and_export, exp, args, args.query, start, end, suffix, year, month_abbr, day))
-                                break
-
-                            if args.query_by == "minute":
-                                start = datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
-                                end = datetime(year, month, day, hour, minute, 59, tzinfo=timezone.utc)
-                                suffix = f"{year}{month_abbr}{day:02}H{hour:02}M{minute:02}"
-                                futures.append(executor.submit(query_and_export, exp, args, args.query, start, end, suffix, year, month_abbr, day))
+                    current = datetime(year, month, day, tzinfo=timezone.utc)
+                    end_of_day = current.replace(hour=23, minute=59, second=59)
+                    while current <= end_of_day:
+                        end = min(current + chunk_delta - timedelta(seconds=1), end_of_day)
+                        suffix = current.strftime(f"%Y{month_abbr}%dH%HM%M")
+                        futures.append(executor.submit(
+                            query_and_export, exp, args, args.query, current, end, suffix, year, month_abbr, day
+                        ))
+                        current += chunk_delta
 
         for future in as_completed(futures):
             future.result()
