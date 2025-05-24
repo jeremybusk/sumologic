@@ -13,18 +13,8 @@ from threading import Semaphore
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import argparse
 
-# --- Configuration Constants ---
-SUMO_HTTP_API_BACKOFF_SECONDS = 8
-LOG_FILE = "sumo-query-to-files.log"
-SQLITE_PATH = "query_chunk_sizes.db"
-DB_CONN: sqlite3.Connection | None = None  # Global DB connection with type hint
-
-# --- Logging Setup ---
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler(sys.stdout)],
-)
+# Global DB connection (will be initialized in main)
+DB_CONN: sqlite3.Connection | None = None
 
 # --- Utility Functions ---
 def must_env(key: str) -> str:
@@ -93,7 +83,7 @@ def generate_time_suffix(dt: datetime, granularity: str) -> str:
     return suffix
 
 # --- Database Functions ---
-def init_db(db_path: str = SQLITE_PATH):
+def init_db(db_path: str):
     """
     Initializes the SQLite database connection and creates the table for optimal chunk sizes.
     """
@@ -153,12 +143,13 @@ def store_optimal_chunk_minutes_in_db(query: str, date_str: str, hour: int, minu
 
 # --- SumoExporter Class ---
 class SumoExporter:
-    def __init__(self, access_id: str, access_key: str, api_endpoint: str, rate_limit: int = 4):
+    def __init__(self, access_id: str, access_key: str, api_endpoint: str, rate_limit: int = 4, backoff_seconds: int = 8):
         self.session = requests.Session()
         self.session.auth = (access_id, access_key)
         self.session.headers.update({"Content-Type": "application/json", "Accept": "application/json"})
         self.api_endpoint = api_endpoint.rstrip('/')
         self.semaphore = Semaphore(rate_limit)
+        self.backoff_seconds = backoff_seconds # Stored as instance variable
 
     def _request_with_retry(self, method: str, url: str, **kwargs) -> requests.Response:
         """
@@ -171,15 +162,15 @@ class SumoExporter:
                 try:
                     resp = self.session.request(method, url, **kwargs)
                     if resp.status_code == 429:  # Rate limit
-                        logging.warning(f"🚦 Rate limit hit for {method} {url}. Backing off for {SUMO_HTTP_API_BACKOFF_SECONDS * (retry_count + 1)}s. Retry count: {retry_count}")
-                        time.sleep(SUMO_HTTP_API_BACKOFF_SECONDS * (retry_count + 1))  # Exponential-ish backoff
+                        logging.warning(f"🚦 Rate limit hit for {method} {url}. Backing off for {self.backoff_seconds * (retry_count + 1)}s. Retry count: {retry_count}")
+                        time.sleep(self.backoff_seconds * (retry_count + 1))  # Exponential-ish backoff
                         retry_count += 1
                         continue
                     resp.raise_for_status()  # Raises HTTPError for bad responses (4xx or 5xx)
                     return resp
                 except requests.exceptions.Timeout as e:
-                    logging.warning(f"⏱️ Timeout for {method} {url}: {e}. Retrying in {SUMO_HTTP_API_BACKOFF_SECONDS}s...")
-                    time.sleep(SUMO_HTTP_API_BACKOFF_SECONDS)
+                    logging.warning(f"⏱️ Timeout for {method} {url}: {e}. Retrying in {self.backoff_seconds}s...")
+                    time.sleep(self.backoff_seconds)
                 except requests.RequestException as e:
                     logging.error(f"🚨 RequestException for {method} {url}: {e}. Retrying in 10s...")
                     time.sleep(10)
@@ -333,15 +324,15 @@ def write_messages_to_files(
     base_output_directory: str,
     file_prefix: str,
     output_granularity: str,
-    no_file_if_zero_messages: bool,
-    skip_if_archive_exists: bool,
+    if_zero_messages_skip_file_write: bool, # Renamed argument
+    overwrite_archive_file_if_exists: bool, # Renamed argument
 ):
     """
     Writes a list of messages to compressed JSON files, grouping them by timestamp
     according to the specified output granularity.
     """
-    if not messages and no_file_if_zero_messages:
-        logging.debug("No messages to write for this chunk and 'no_file_if_zero_messages' is True. Skipping.")
+    if not messages and if_zero_messages_skip_file_write:
+        logging.debug("No messages to write for this chunk and 'if_zero_messages_skip_file_write' is True. Skipping.")
         return
 
     grouped_by_file_target = defaultdict(list)
@@ -403,12 +394,14 @@ def write_messages_to_files(
         )
         final_file_path = os.path.join(output_dir_path, f"{file_prefix}_{filename_time_suffix}.json.zst")
 
-        if no_file_if_zero_messages and not items_for_file:
+        if if_zero_messages_skip_file_write and not items_for_file:
             logging.info(f"💨 Skipping empty file target: {final_file_path}")
             continue
 
-        if skip_if_archive_exists and os.path.exists(final_file_path):
-            logging.info(f"☑️ Final target file {final_file_path} already exists. Skipping write.")
+        # Logic for --overwrite-archive-file-if-exists
+        # If overwrite_archive_file_if_exists is False AND the file exists, then skip.
+        if not overwrite_archive_file_if_exists and os.path.exists(final_file_path):
+            logging.info(f"☑️ Final target file {final_file_path} already exists and --overwrite-archive-file-if-exists is not set. Skipping write.")
             continue
 
         logging.info(f"💾 Attempting to save {len(items_for_file)} messages to: {final_file_path}")
@@ -429,14 +422,14 @@ def process_query_chunk(
     sumo_query: str,
     chunk_start_time: datetime,
     chunk_end_time: datetime,
-    job_marker_suffix: str, # This is the argument you're using
+    job_marker_suffix: str,
     max_messages_per_file: int,
     poll_initial_delay: int,
     base_output_directory: str,
     file_prefix: str,
     output_granularity: str,
-    skip_if_archive_exists: bool,
-    no_file_if_zero_messages: bool,
+    overwrite_archive_file_if_exists: bool, # Renamed argument
+    if_zero_messages_skip_file_write: bool, # Renamed argument
     depth: int = 0,
 ):
     """
@@ -451,10 +444,12 @@ def process_query_chunk(
         chunk_start_time.hour, chunk_start_time.minute
     )
 
-    if skip_if_archive_exists and check_job_marker_exists(
+    # Logic for --overwrite-archive-file-if-exists
+    # If overwrite_archive_file_if_exists is False AND the marker file exists, then skip.
+    if not overwrite_archive_file_if_exists and check_job_marker_exists(
         base_output_directory, file_prefix, job_marker_suffix, s_year, s_month_abbr, s_day, s_hour, s_minute, output_granularity
     ):
-        logging.info(f"{indent}⏭️ Skipping job {job_marker_suffix} ({chunk_start_time.isoformat()} to {chunk_end_time.isoformat()}) as its marker/output file exists.")
+        logging.info(f"{indent}⏭️ Skipping job {job_marker_suffix} ({chunk_start_time.isoformat()} to {chunk_end_time.isoformat()}) as its marker/output file exists and --overwrite-archive-file-if-exists is not set.")
         return
 
     logging.info(f"{indent}🔎 Querying for job {job_marker_suffix}: {chunk_start_time.isoformat()} → {chunk_end_time.isoformat()}")
@@ -465,7 +460,6 @@ def process_query_chunk(
         exporter.wait_for_job_completion(job_id, initial_delay=poll_initial_delay)
 
         messages = list(exporter.stream_job_messages(job_id, max_messages_to_fetch=max_messages_per_file + 1))
-        # FIX: Use job_marker_suffix here instead of the undefined job_id_suffix
         logging.info(f"{indent}📬 Received {len(messages)} messages for job {job_marker_suffix}.")
 
         if len(messages) > max_messages_per_file:
@@ -493,7 +487,7 @@ def process_query_chunk(
                         exporter, sumo_query, sub_chunk_start, sub_chunk_end,
                         sub_job_marker_suffix, max_messages_per_file, poll_initial_delay,
                         base_output_directory, file_prefix, output_granularity,
-                        skip_if_archive_exists, no_file_if_zero_messages, depth + 1
+                        overwrite_archive_file_if_exists, if_zero_messages_skip_file_write, depth + 1
                     )
                 return
             else:
@@ -502,7 +496,7 @@ def process_query_chunk(
 
         write_messages_to_files(
             messages, base_output_directory, file_prefix, output_granularity,
-            no_file_if_zero_messages, skip_if_archive_exists
+            if_zero_messages_skip_file_write, overwrite_archive_file_if_exists
         )
 
     except Exception as e:
@@ -514,16 +508,27 @@ def process_query_chunk(
 def main():
     parser = argparse.ArgumentParser(description="Extract data from SumoLogic to compressed JSON files.")
 
+    # General Configuration Arguments
+    parser.add_argument("--backoff-seconds", type=int, default=8,
+                        help="Seconds to back off when SumoLogic API rate limit is hit.")
+    parser.add_argument("--log-file", type=str, default="sumo-query-to-files.log",
+                        help="Path to the log file.")
+    parser.add_argument("--db-path", type=str, default="query_chunk_sizes.db",
+                        help="Path to the SQLite database file for storing optimal chunk sizes.")
+
+    # SumoLogic Query Arguments
     parser.add_argument("--sumo-query", required=True, help="The SumoLogic query string.")
     parser.add_argument("--years", nargs="+", type=int, required=True, help="Year(s) to process (e.g., 2023 2024).")
     parser.add_argument("--months", nargs="+", help="Month abbreviation(s) to process (e.g., Jan Feb). Processes all if omitted.")
     parser.add_argument("--days", nargs="+", type=int, help="Day(s) of the month to process (e.g., 1 15). Processes all if omitted.")
 
+    # Output File Arguments
     parser.add_argument("--file-prefix", default="sumo_export", help="Prefix for output filenames and directories.")
     parser.add_argument("--base-output-directory", default="sumo-archive", help="Root directory where archives will be stored.")
     parser.add_argument("--output-granularity", choices=["month", "day", "hour", "minute"], default="month",
                         help="Granularity of subdirectories and file names for storing data.")
 
+    # Performance and Throttling Arguments
     parser.add_argument("--max-concurrent-api-calls", type=int, default=4,
                         help="Maximum concurrent API calls to SumoLogic (rate limit).")
     parser.add_argument("--max-messages-per-file", type=int, default=100000,
@@ -533,11 +538,13 @@ def main():
     parser.add_argument("--job-poll-initial-delay-seconds", type=int, default=10,
                         help="Initial delay (seconds) before polling Sumo Logic job status.")
 
-    parser.add_argument("--skip-if-archive-exists", action="store_true",
-                        help="If set, skips processing for a time chunk if its corresponding output file/marker already exists.")
-    parser.add_argument("--no-file-if-zero-messages", action="store_true",
-                        help="If set, do not create a file if a chunk query returns zero messages.")
+    # Behavior Control Arguments
+    parser.add_argument("--overwrite-archive-file-if-exists", action="store_true",
+                        help="If set, existing output files will be overwritten. By default, processing is skipped if the file/marker exists.")
+    parser.add_argument("--if-zero-messages-skip-file-write", action="store_true",
+                        help="If set, a file will not be created if a chunk query returns zero messages.")
 
+    # Optimal Chunk Discovery Arguments
     parser.add_argument("--discover-optimal-chunk-sizes", action="store_true",
                         help="If set, only find and store optimal chunk sizes for the specified "
                              "query and time ranges to the database. Does not export actual data.")
@@ -547,13 +554,26 @@ def main():
 
     args = parser.parse_args()
 
-    init_db()
+    # Configure logging with the specified log file
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[logging.FileHandler(args.log_file), logging.StreamHandler(sys.stdout)],
+    )
+
+    init_db(args.db_path)
 
     sumo_access_id = must_env("SUMO_ACCESS_ID")
     sumo_access_key = must_env("SUMO_ACCESS_KEY")
     sumo_api_endpoint = must_env("SUMO_API_ENDPOINT")
 
-    exporter = SumoExporter(sumo_access_id, sumo_access_key, sumo_api_endpoint, rate_limit=args.max_concurrent_api_calls)
+    exporter = SumoExporter(
+        sumo_access_id,
+        sumo_access_key,
+        sumo_api_endpoint,
+        rate_limit=args.max_concurrent_api_calls,
+        backoff_seconds=args.backoff_seconds # Pass backoff_seconds to exporter
+    )
 
     export_tasks = []
 
@@ -598,6 +618,7 @@ def main():
                         loop_chunk_start_dt = current_hour_start_dt
                         end_of_hour_dt = current_hour_start_dt.replace(minute=59, second=59, microsecond=999999)
 
+
                         while loop_chunk_start_dt <= end_of_hour_dt:
                             loop_chunk_end_dt = min(loop_chunk_start_dt + actual_chunk_delta - timedelta(seconds=1), end_of_hour_dt)
 
@@ -607,8 +628,9 @@ def main():
                                 exporter, args.sumo_query, loop_chunk_start_dt, loop_chunk_end_dt,
                                 job_marker_suffix, args.max_messages_per_file,
                                 args.job_poll_initial_delay_seconds, args.base_output_directory,
-                                args.file_prefix, args.output_granularity, args.skip_if_archive_exists,
-                                args.no_file_if_zero_messages
+                                args.file_prefix, args.output_granularity,
+                                args.overwrite_archive_file_if_exists, # Pass new arg
+                                args.if_zero_messages_skip_file_write # Pass new arg
                             ))
                             loop_chunk_start_dt += actual_chunk_delta
 
