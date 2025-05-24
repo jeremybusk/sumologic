@@ -639,7 +639,7 @@ def main():
                         help="Maximum messages per output file. If a query chunk exceeds this, it may be split or truncated.")
     parser.add_argument("--initial-optimal-chunk-search-minutes", type=int, default=60,
                         help="Max duration in minutes for the initial search window when determining optimal chunk size (e.g., 60 for 1hr).")
-    parser.add_argument("--job-poll-initial-delay-seconds", type=int, default=10,
+    parser.add_argument("--job-poll-initial-delay-seconds", type=int, default=1,
                         help="Initial delay (seconds) before polling Sumo Logic job status.")
 
     # Behavior Control Arguments
@@ -651,41 +651,49 @@ def main():
     # Optimal Chunk Discovery Arguments
     parser.add_argument("--discover-optimal-chunk-sizes", action="store_true",
                         help="If set, only find and store optimal chunk sizes for the specified "
-                             "query and time ranges to the database. Does not export actual data.")
-    parser.add_argument("--default-chunk-minutes-if-not-found", type=int, default=60,
-                        help="Default chunk size in minutes to use for data export if an optimal size "
-                             "is not found in the database (and not in discovery mode).")
+                             "query and time ranges to the database. Does not export actual data.") # <--- Corrected this line
+    parser.add_argument("--re-evaluate-optimal-chunk-after-hours", type=int, default=24,
+                        help="Re-evaluate optimal chunk size if the last evaluation was more than this many hours ago.")
 
-    # Adaptive Sizing Arguments
-    parser.add_argument("--adaptive-shrink-consecutive-count", type=int, default=1,
-                        help="Number of consecutive query chunk size reductions (due to exceeding message limit or being split) before the 'global optimal' chunk size is set to the newly shrunk size.")
-    parser.add_argument("--adaptive-grow-trigger-message-percent", type=int, default=50,
-                        help="Percentage threshold (e.g., 50 means < 50% of max-messages-per-file) below which a chunk's message count will trigger the adaptive logic to attempt to GROW the chunk size. This prevents unnecessarily small chunks for sparse data.")
-    parser.add_argument("--adaptive-grow-consecutive-count", type=int, default=2,
-                        help="Number of consecutive query chunk size increases (due to low message count) before the 'global optimal' chunk size is set to the newly grown size.")
-    parser.add_argument("--adaptive-re-evaluation-interval-hours", type=int, default=12,
-                        help="Interval in hours to periodically re-evaluate the global optimal chunk size, even if consecutive grow/shrink conditions aren't met. This helps adapt to changing data volumes over long periods. For very stable data or cost-sensitive Infrequent Tier, consider increasing this.")
+    # Debugging and Dry Run Arguments
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Perform a dry run without making Sumo Logic API calls or writing files.")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging.")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging (very verbose).")
 
     args = parser.parse_args()
 
-    # Configure logging with the specified log file
+    # Configure logging
+    log_level = logging.INFO
+    if args.verbose:
+        log_level = logging.DEBUG
+    if args.debug:
+        log_level = logging.DEBUG # More granular control could be added here if needed
+
+    # Set up logging to file and console
     logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[logging.FileHandler(args.log_file), logging.StreamHandler(sys.stdout)],
+        level=log_level,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(args.log_file),
+            logging.StreamHandler(sys.stdout)
+        ]
     )
 
-    # Use the same db path for both tables for simplicity
-    init_db(args.db_path, args.db_path)
+    logging.info("🚀 Starting Sumo Logic data export script...")
+    logging.debug(f"Parsed arguments: {args}")
 
+    # Initialize DB connections
+    init_db(args.db_path, args.db_path) # Pass the same path for both for simplicity
+
+    # Initialize SumoExporter
     sumo_access_id = must_env("SUMO_ACCESS_ID")
     sumo_access_key = must_env("SUMO_ACCESS_KEY")
     sumo_api_endpoint = must_env("SUMO_API_ENDPOINT")
-
     exporter = SumoExporter(
-        sumo_access_id,
-        sumo_access_key,
-        sumo_api_endpoint,
+        access_id=sumo_access_id,
+        access_key=sumo_access_key,
+        api_endpoint=sumo_api_endpoint,
         rate_limit=args.max_concurrent_api_calls,
         backoff_seconds=args.backoff_seconds
     )
@@ -789,7 +797,7 @@ def main():
                 (exporter, sumo_query, chunk_start_time, chunk_end_time,
                  job_marker_suffix, max_messages_per_file, poll_initial_delay,
                  base_output_directory, file_prefix, output_granularity,
-                 overwrite_archive_file_if_zero_exists, if_zero_messages_skip_file_write,
+                 overwrite_archive_file_if_exists, if_zero_messages_skip_file_write,
                  adaptive_shrink_consecutive_count, adaptive_grow_trigger_message_percent,
                  adaptive_grow_consecutive_count,
                  db_date_str, hour_num, query_hash_for_db, current_optimal_minutes_for_this_chunk) = task_args
@@ -799,7 +807,7 @@ def main():
                     exporter, sumo_query, chunk_start_time, chunk_end_time,
                     job_marker_suffix, max_messages_per_file, poll_initial_delay,
                     base_output_directory, file_prefix, output_granularity,
-                    overwrite_archive_file_if_zero_exists, if_zero_messages_skip_file_write,
+                    overwrite_archive_file_if_exists, if_zero_messages_skip_file_write,
                     adaptive_shrink_consecutive_count, adaptive_grow_trigger_message_percent,
                     adaptive_grow_consecutive_count,
                     db_date_str, hour_num, query_hash_for_db, current_optimal_minutes_for_this_chunk # Pass through DB context
