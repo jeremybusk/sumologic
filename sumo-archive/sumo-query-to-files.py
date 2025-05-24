@@ -9,9 +9,12 @@ import time
 import zstandard
 import threading
 import math
+import gzip # New import for gzip
+import lz4.frame # New import for lz4
+
 from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Any, Tuple, Optional, Set
-from concurrent.futures import ThreadPoolExecutor, as_completed # Import these
+from typing import List, Dict, Any, Tuple, Optional, Set, Literal
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from requests.exceptions import RequestException, HTTPError
@@ -28,13 +31,19 @@ DEFAULT_ADAPTIVE_GROW_TRIGGER_MESSAGE_PERCENT = 0.5
 DEFAULT_ADAPTIVE_GROW_CONSECUTIVE_COUNT = 5
 DEFAULT_SPLIT_INTERVALS = "60,30,15,5,1"
 DEFAULT_DB_PATH = "trun.db"
-DEFAULT_MAX_CONCURRENT_API_CALLS = 5 # Renamed to reflect its use as ThreadPoolExecutor max_workers
+DEFAULT_MAX_CONCURRENT_API_CALLS = 5
 
 # --- New Backoff Constants ---
 DEFAULT_API_RETRY_INITIAL_DELAY_SECONDS = 1
 DEFAULT_API_RETRY_MAX_DELAY_SECONDS = 60
 DEFAULT_API_MAX_RETRIES = 10 # Total attempts including the first one
 DEFAULT_API_RETRY_BACKOFF_FACTOR = 2 # Exponential backoff (delay * factor)
+
+# --- New Compression Constants ---
+DEFAULT_COMPRESSION_FORMAT: Literal['zstd', 'gzip', 'lz4', 'none'] = 'zstd' # Default to zstd
+DEFAULT_ZSTD_COMPRESSION_LEVEL = 3
+DEFAULT_GZIP_COMPRESSION_LEVEL = 3 # 1-9, 9 is best
+DEFAULT_LZ4_COMPRESSION_LEVEL = 0 # 0-16, 0 is default/fastest, 16 is best
 
 # --- Logging Setup ---
 log = logging.getLogger(__name__)
@@ -53,14 +62,10 @@ def must_env(name: str) -> str:
     return value
 
 # --- Database Setup (for optimal chunk sizes) ---
-# IMPORTANT: For ThreadPoolExecutor, sqlite3 connections are NOT thread-safe by default.
-# It's safer to open a new connection for each thread's task, or use threading.local()
-# to store a connection unique to that thread. For simplicity here, we'll ensure
-# OptimalChunksDB is instantiated per task where it needs to write/read.
 class OptimalChunksDB:
     def __init__(self, db_path: str = DEFAULT_DB_PATH):
         self.db_path = db_path
-        self.conn = sqlite3.connect(db_path, timeout=30.0) # Add timeout for concurrent access
+        self.conn = sqlite3.connect(db_path, timeout=30.0)
         self.cursor = self.conn.cursor()
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS optimal_chunks (
@@ -155,7 +160,7 @@ class SumoExporter:
             self.endpoint = endpoint.rstrip('/') + "/api/v1"
         else:
             self.endpoint = endpoint
-
+            
         self.dry_run = dry_run
         self.headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
         self.session = requests.Session()
@@ -168,7 +173,7 @@ class SumoExporter:
 
     def _make_request(self, method: str, path: str, **kwargs) -> Dict[str, Any]:
         url = f"{self.endpoint}{path}"
-
+        
         for attempt in range(self.api_max_retries):
             log.debug(f"Making {method} request to {url} (Attempt {attempt + 1}/{self.api_max_retries}) with kwargs: {kwargs}")
             try:
@@ -281,8 +286,9 @@ def get_query_hash(query: str) -> str:
 
 def build_output_path(base_output_directory: str, file_prefix: str, output_granularity: str,
                       current_year: int, current_month_abbr: str, current_day: Optional[int],
-                      current_hour: Optional[int], current_minute: Optional[int]) -> Tuple[str, str]:
-    """Builds the full output directory and file path based on granularity."""
+                      current_hour: Optional[int], current_minute: Optional[int],
+                      compression_format: Literal['zstd', 'gzip', 'lz4', 'none']) -> Tuple[str, str]:
+    """Builds the full output directory and file path based on granularity and compression format."""
     current_month_num = list(calendar.month_abbr).index(current_month_abbr)
 
     output_dir_path = os.path.join(base_output_directory, str(current_year))
@@ -305,7 +311,17 @@ def build_output_path(base_output_directory: str, file_prefix: str, output_granu
                  tzinfo=timezone.utc),
         output_granularity
     )
-    final_file_path = os.path.join(output_dir_path, f"{file_prefix}_{filename_time_suffix}.json.zst")
+    
+    extension = ".json"
+    if compression_format == 'zstd':
+        extension += ".zst"
+    elif compression_format == 'gzip':
+        extension += ".gz"
+    elif compression_format == 'lz4':
+        extension += ".lz4"
+    # For 'none', it's just .json
+
+    final_file_path = os.path.join(output_dir_path, f"{file_prefix}_{filename_time_suffix}{extension}")
 
     return output_dir_path, final_file_path
 
@@ -313,6 +329,7 @@ def get_expected_file_paths_for_range(
     base_output_directory: str,
     file_prefix: str,
     output_granularity: str,
+    compression_format: Literal['zstd', 'gzip', 'lz4', 'none'],
     chunk_start_time: datetime,
     chunk_end_time: datetime
 ) -> Set[str]:
@@ -343,7 +360,8 @@ def get_expected_file_paths_for_range(
 
         _, file_path = build_output_path(
             base_output_directory, file_prefix, output_granularity,
-            current_year, current_month_abbr, current_day, current_hour, current_minute
+            current_year, current_month_abbr, current_day, current_hour, current_minute,
+            compression_format
         )
         expected_files.add(file_path)
 
@@ -364,7 +382,10 @@ def write_messages_to_files(messages: List[Dict[str, Any]],
                             output_granularity: str,
                             if_zero_messages_skip_file_write: bool,
                             overwrite_archive_file_if_exists: bool,
-                            compressor: zstandard.ZstdCompressor,
+                            compression_format: Literal['zstd', 'gzip', 'lz4', 'none'],
+                            zstd_compressor: Optional[zstandard.ZstdCompressor],
+                            gzip_compression_level: int,
+                            lz4_compression_level: int,
                             dry_run: bool = False):
     if not messages and if_zero_messages_skip_file_write:
         log.info("Skipping file write as 0 messages received and skip_if_zero_messages is true.")
@@ -373,13 +394,13 @@ def write_messages_to_files(messages: List[Dict[str, Any]],
     grouped_messages = {}
     for msg in messages:
         msg_timestamp_ms = msg.get('_messagetime')
-
+        
         if msg_timestamp_ms is None:
             log.debug(f"'_messagetime' not found for message, using current UTC time. Message: {msg}")
             msg_dt = datetime.now(timezone.utc)
         else:
             try:
-                msg_timestamp_ms = int(msg_timestamp_ms)
+                msg_timestamp_ms = int(msg_timestamp_ms) 
                 msg_dt = datetime.fromtimestamp(msg_timestamp_ms / 1000, tz=timezone.utc)
             except (ValueError, TypeError):
                 log.warning(f"Could not parse '_messagetime' '{msg_timestamp_ms}' for message. Using current UTC time. Message: {msg}")
@@ -403,7 +424,7 @@ def write_messages_to_files(messages: List[Dict[str, Any]],
             raise ValueError(f"Unsupported output granularity: {output_granularity}")
 
         key = generate_time_suffix(key_dt, output_granularity)
-
+        
         if key not in grouped_messages:
             grouped_messages[key] = {
                 'year': current_year,
@@ -418,11 +439,12 @@ def write_messages_to_files(messages: List[Dict[str, Any]],
     for key, data in grouped_messages.items():
         output_dir, file_path = build_output_path(
             base_output_directory, file_prefix, output_granularity,
-            data['year'], data['month_abbr'], data['day'], data['hour'], data['minute']
+            data['year'], data['month_abbr'], data['day'], data['hour'], data['minute'],
+            compression_format
         )
 
         if dry_run:
-            log.info(f"[Dry Run] Would write {len(data['messages'])} messages to {file_path}")
+            log.info(f"[Dry Run] Would write {len(data['messages'])} messages to {file_path} using {compression_format.upper()} compression.")
             continue
 
         if os.path.exists(file_path):
@@ -433,18 +455,37 @@ def write_messages_to_files(messages: List[Dict[str, Any]],
                 continue
 
         try:
-            with open(file_path, 'wb') as f:
-                with compressor.stream_writer(f) as zstd_writer:
+            # Determine the file opener based on compression format
+            if compression_format == 'zstd':
+                # Use zstd_compressor passed in
+                with open(file_path, 'wb') as f:
+                    with zstd_compressor.stream_writer(f) as writer:
+                        for msg in data['messages']:
+                            json_line = json.dumps(msg) + '\n'
+                            writer.write(json_line.encode('utf-8'))
+            elif compression_format == 'gzip':
+                # Use gzip.open with specified compression level
+                with gzip.open(file_path, 'wt', compresslevel=gzip_compression_level, encoding='utf-8') as f:
+                    for msg in data['messages']:
+                        f.write(json.dumps(msg) + '\n')
+            elif compression_format == 'lz4':
+                # Use lz4.frame.open with specified compression level
+                with lz4.frame.open(file_path, 'wb', compression_level=lz4_compression_level) as f:
                     for msg in data['messages']:
                         json_line = json.dumps(msg) + '\n'
-                        zstd_writer.write(json_line.encode('utf-8'))
-            log.info(f"📦 Wrote {len(data['messages'])} messages to {file_path}")
+                        f.write(json_line.encode('utf-8'))
+            elif compression_format == 'none':
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    for msg in data['messages']:
+                        f.write(json.dumps(msg) + '\n')
+            else:
+                raise ValueError(f"Unsupported compression format: {compression_format}")
+
+            log.info(f"📦 Wrote {len(data['messages'])} messages to {file_path} using {compression_format.upper()} compression.")
         except IOError as e:
             log.error(f"Error writing to file {file_path}: {e}")
 
 # --- Core Logic for Processing Chunks ---
-# This function will be called by ThreadPoolExecutor
-# All necessary arguments must be passed explicitly.
 def process_query_chunk_recursive(
     exporter: SumoExporter,
     sumo_query: str,
@@ -462,20 +503,20 @@ def process_query_chunk_recursive(
     adaptive_shrink_consecutive_count: int,
     adaptive_grow_trigger_message_percent: float,
     adaptive_grow_consecutive_count: int,
-    compressor: zstandard.ZstdCompressor,
-    db_path: str, # Pass db_path instead of db object
+    compression_format: Literal['zstd', 'gzip', 'lz4', 'none'], # Pass compression format
+    zstd_compressor: Optional[zstandard.ZstdCompressor], # Pass zstd compressor
+    gzip_compression_level: int, # Pass gzip level
+    lz4_compression_level: int, # Pass lz4 level
+    db_path: str,
     query_hash: Optional[str],
-    optimal_minutes_for_hour: Optional[int], # This is the "parent" optimal minutes (for the *original* hour)
-    current_optimal_minutes_for_this_chunk: int, # This is the optimal minutes for the *current* chunk being processed
+    optimal_minutes_for_hour: Optional[int],
+    current_optimal_minutes_for_this_chunk: int,
     split_intervals: List[int],
     depth: int = 0
 ) -> Tuple[int, bool, bool]:
-
-    # Open DB connection in this thread if needed for adaptive logic
-    # This ensures thread-safety for SQLite
-    # db = OptimalChunksDB(db_path) if optimal_chunks_db is not None else None # Reuse the existing name `db` for context
+    
     db = OptimalChunksDB(db_path) # Always create a new DB connection for this thread/task
-
+    
     indent = "    " * depth
     job_id = None
     messages_count_for_chunk = 0
@@ -487,16 +528,17 @@ def process_query_chunk_recursive(
         if not overwrite_archive_file_if_exists:
             expected_files = get_expected_file_paths_for_range(
                 base_output_directory, file_prefix, output_granularity,
+                compression_format, # Pass compression_format to path generation
                 chunk_start_time, chunk_end_time
             )
-
-            if expected_files:
+            
+            if expected_files: 
                 all_expected_files_exist = True
                 for fpath in expected_files:
                     if not os.path.exists(fpath):
                         all_expected_files_exist = False
                         break
-
+                
                 if all_expected_files_exist:
                     log.info(f"{indent}✅ All expected files for chunk {job_marker_suffix} already exist. Skipping Sumo Logic query.")
                     return 0, False, True
@@ -536,7 +578,7 @@ def process_query_chunk_recursive(
                 if interval_minutes < current_duration_minutes and interval_minutes >= 1:
                     new_split_duration_minutes = interval_minutes
                     break
-
+            
             split_granularity_duration = timedelta(minutes=new_split_duration_minutes)
 
             if new_split_duration_minutes == current_duration_minutes or current_duration_minutes == 1:
@@ -545,7 +587,9 @@ def process_query_chunk_recursive(
                 messages = list(exporter.stream_job_messages(job_id, messages_per_api_request, max_messages_to_fetch=messages_to_fetch))
                 write_messages_to_files(
                     messages, base_output_directory, file_prefix, output_granularity,
-                    if_zero_messages_skip_file_write, overwrite_archive_file_if_exists, compressor, dry_run=exporter.dry_run
+                    if_zero_messages_skip_file_write, overwrite_archive_file_if_exists, 
+                    compression_format, zstd_compressor, gzip_compression_level, lz4_compression_level, # Pass compression args
+                    dry_run=exporter.dry_run
                 )
             else:
                 num_sub_chunks = math.ceil(duration.total_seconds() / 60 / new_split_duration_minutes)
@@ -553,13 +597,8 @@ def process_query_chunk_recursive(
 
                 messages_sum_from_subchunks = 0
 
-                # When splitting, we'll recursively call process_query_chunk_recursive.
-                # These recursive calls will run within the *same* thread as the current call.
-                # If we wanted to submit sub-chunks to the thread pool, we'd need to pass the executor
-                # down, which can complicate the recursive structure and might not be beneficial
-                # if the goal is to manage top-level hourly concurrency.
                 for i in range(num_sub_chunks):
-                    sub_chunk_start = chunk_start_time + i * split_granularity_duration
+                    sub_chunk_start = chunk_start_time + i * timedelta(minutes=new_split_duration_minutes)
                     if sub_chunk_start > chunk_end_time:
                         break
 
@@ -569,7 +608,7 @@ def process_query_chunk_recursive(
                          marker_granularity = "minute"
                     else:
                          marker_granularity = "hour"
-
+                    
                     sub_job_marker_suffix = generate_time_suffix(sub_chunk_start, marker_granularity)
 
                     sub_messages_count, sub_was_split, sub_was_skipped = process_query_chunk_recursive(
@@ -579,7 +618,8 @@ def process_query_chunk_recursive(
                         base_output_directory, file_prefix, output_granularity,
                         overwrite_archive_file_if_exists, if_zero_messages_skip_file_write,
                         adaptive_shrink_consecutive_count, adaptive_grow_trigger_message_percent,
-                        adaptive_grow_consecutive_count, compressor,
+                        adaptive_grow_consecutive_count, 
+                        compression_format, zstd_compressor, gzip_compression_level, lz4_compression_level, # Pass compression args
                         db_path, query_hash, optimal_minutes_for_hour,
                         new_split_duration_minutes,
                         split_intervals,
@@ -600,7 +640,9 @@ def process_query_chunk_recursive(
                 messages = list(exporter.stream_job_messages(job_id, messages_per_api_request, max_messages_to_fetch=messages_count_for_chunk))
                 write_messages_to_files(
                     messages, base_output_directory, file_prefix, output_granularity,
-                    if_zero_messages_skip_file_write, overwrite_archive_file_if_exists, compressor, dry_run=exporter.dry_run
+                    if_zero_messages_skip_file_write, overwrite_archive_file_if_exists, 
+                    compression_format, zstd_compressor, gzip_compression_level, lz4_compression_level, # Pass compression args
+                    dry_run=exporter.dry_run
                 )
 
     except (RequestException, TimeoutError, ValueError) as e:
@@ -617,7 +659,6 @@ def process_query_chunk_recursive(
             db.close()
 
     # Adaptive logic for the _original_ hour-level chunk (depth == 0)
-    # Ensure db object is valid if we're at depth 0
     if db and query_hash and optimal_minutes_for_hour is not None and depth == 0:
         dt_for_metrics = datetime(chunk_start_time.year, chunk_start_time.month, chunk_start_time.day,
                                   chunk_start_time.hour, tzinfo=timezone.utc)
@@ -627,14 +668,14 @@ def process_query_chunk_recursive(
             db.update_adaptive_metrics(query_hash, dt_for_metrics,
                                                       over_limit_increment=1, reset_under=True)
             new_over_count, _ = db.get_adaptive_metrics(query_hash, dt_for_metrics)
-
+            
             if new_over_count >= adaptive_shrink_consecutive_count and optimal_minutes_for_hour > min(split_intervals):
                 new_optimal_minutes = min(split_intervals)
                 for interval in sorted(split_intervals, reverse=True):
                     if interval < optimal_minutes_for_hour:
                         new_optimal_minutes = interval
                         break
-
+                
                 log.info(f"{indent}Adaptive: Shrinking optimal chunk size for {dt_for_metrics.isoformat()} from {optimal_minutes_for_hour} to {new_optimal_minutes} minutes due to consecutive over-limit. Resetting over-limit count.")
                 db.set_optimal_chunk_minutes(query_hash, dt_for_metrics, new_optimal_minutes)
                 db.update_adaptive_metrics(query_hash, dt_for_metrics, reset_over=True)
@@ -651,7 +692,7 @@ def process_query_chunk_recursive(
                         if interval > optimal_minutes_for_hour:
                             new_optimal_minutes = interval
                             break
-
+                    
                     log.info(f"{indent}Adaptive: Growing optimal chunk size for {dt_for_metrics.isoformat()} from {optimal_minutes_for_hour} to {new_optimal_minutes} minutes due to consecutive under-limit. Resetting under-limit count.")
                     db.set_optimal_chunk_minutes(query_hash, dt_for_metrics, new_optimal_minutes)
                     db.update_adaptive_metrics(query_hash, dt_for_metrics, reset_under=True)
@@ -674,7 +715,7 @@ def find_optimal_chunk_size(
     log.info(f"🔍 Determining optimal chunk size for query hash (partial), starting at {search_start_time.isoformat()} (max {max_minutes_for_search_window} min search window)")
 
     current_test_chunk_size_minutes = max_minutes_for_search_window
-
+    
     if current_test_chunk_size_minutes == 0:
         current_test_chunk_size_minutes = 1
 
@@ -729,20 +770,23 @@ def run_export(args):
         raise ValueError("Sumo Logic Access ID not provided. Use --sumo-access-id or set SUMO_ACCESS_ID environment variable.")
     if not sumo_access_key:
         raise ValueError("Sumo Logic Access Key not provided. Use --sumo-access-key or set SUMO_ACCESS_KEY environment variable.")
-
-    # The main exporter instance to be shared across threads. requests.Session is thread-safe.
+    
     exporter = SumoExporter(
-        access_id=sumo_access_id,
-        access_key=sumo_access_key,
-        endpoint=sumo_api_endpoint,
+        access_id=sumo_access_id, 
+        access_key=sumo_access_key, 
+        endpoint=sumo_api_endpoint, 
         dry_run=args.dry_run,
         api_retry_initial_delay=args.api_retry_initial_delay_seconds,
         api_retry_max_delay=args.api_retry_max_delay_seconds,
         api_max_retries=args.api_max_retries,
         api_retry_backoff_factor=args.api_retry_backoff_factor
-    )
+    ) 
     query_hash = get_query_hash(args.sumo_query)
-    compressor = zstandard.ZstdCompressor(level=3)
+    
+    # Initialize compressor based on selection
+    zstd_compressor = None
+    if args.compression_format == 'zstd':
+        zstd_compressor = zstandard.ZstdCompressor(level=args.zstd_compression_level)
 
     split_intervals_parsed = []
     try:
@@ -756,19 +800,18 @@ def run_export(args):
 
     log.info(f"Using split intervals: {split_intervals_parsed}")
 
-    tasks_to_queue = [] # List to hold arguments for each hourly task
+    tasks_to_queue = []
 
     target_years = args.years
     target_months = [m.lower() for m in args.months] if args.months else list(calendar.month_abbr)[1:]
     target_days = args.days
     target_hours = args.hours
 
-    # Pre-calculate and queue all top-level hourly tasks
     for year in target_years:
         for month_num, month_abbr in enumerate(calendar.month_abbr):
             if month_num == 0 or month_abbr.lower() not in target_months:
                 continue
-
+            
             if target_days:
                 days_in_month = [d for d in target_days if 1 <= d <= calendar.monthrange(year, month_num)[1]]
             else:
@@ -780,41 +823,30 @@ def run_export(args):
                     current_hour_start_dt = datetime(year, month_num, day, hour, 0, 0, tzinfo=timezone.utc)
                     current_hour_end_dt = datetime(year, month_num, day, hour, 59, 59, tzinfo=timezone.utc)
 
-                    # We need a DB connection for each task, as sqlite3 connections are not thread-safe.
-                    # Or, as we do here, create a new connection for each task.
-                    # We pass the db_path to the task function, which will create its own connection.
-                    db_for_optimal_chunk_discovery = OptimalChunksDB(args.db_path) # Temp DB for initial discovery
+                    db_for_optimal_chunk_discovery = OptimalChunksDB(args.db_path)
                     current_optimal_minutes_for_this_hour = db_for_optimal_chunk_discovery.get_optimal_chunk_minutes(query_hash, current_hour_start_dt)
-                    db_for_optimal_chunk_discovery.close() # Close temp DB
+                    db_for_optimal_chunk_discovery.close()
 
                     if current_optimal_minutes_for_this_hour is None:
                         if args.discover_optimal_chunk_sizes:
                             max_search_window_minutes = min(args.initial_optimal_chunk_search_minutes, 60)
-                            # Discovery of optimal chunk sizes is also an API call, so it should be handled
-                            # within the thread pool if it's going to happen for many hours.
-                            # For simplicity and to avoid nested ThreadPoolExecutors/deadlocks,
-                            # we'll do this discovery sequentially *before* queuing for main export.
-                            # If `discover_optimal_chunk_sizes` is True and no optimal chunk found,
-                            # this part still runs sequentially.
                             current_optimal_minutes_for_this_hour = find_optimal_chunk_size(
                                 exporter, args.sumo_query, current_hour_start_dt,
                                 max_search_window_minutes, args.max_messages_per_file,
-                                args.job_poll_initial_delay_seconds,
+                                args.job_poll_initial_delay_seconds, 
                                 dry_run=args.dry_run
                             )
-                            # Re-open DB to save the discovered value (or pass db_path to find_optimal_chunk_size to save internally)
                             db_to_save_optimal = OptimalChunksDB(args.db_path)
                             db_to_save_optimal.set_optimal_chunk_minutes(query_hash, current_hour_start_dt, current_optimal_minutes_for_this_hour)
                             db_to_save_optimal.close()
                         else:
-                            current_optimal_minutes_for_this_hour = DEFAULT_CHUNK_MINUTES_IF_NOT_FOUND
+                            current_optimal_minutes_for_this_hour = args.default_chunk_minutes_if_not_found
                             log.info(f"No optimal chunk size found for {current_hour_start_dt.isoformat()}. Using default: {current_optimal_minutes_for_this_hour} minutes.")
 
                     minutes_to_process_in_this_pass = current_optimal_minutes_for_this_hour
                     num_sub_chunks_in_hour = math.ceil(60 / minutes_to_process_in_this_pass)
                     num_sub_chunks_in_hour = int(max(1, num_sub_chunks_in_hour))
 
-                    # Each of these sub-chunks will be a task for the ThreadPoolExecutor
                     for i in range(num_sub_chunks_in_hour):
                         chunk_start_time = current_hour_start_dt + i * timedelta(minutes=minutes_to_process_in_this_pass)
                         if chunk_start_time > current_hour_end_dt:
@@ -822,15 +854,14 @@ def run_export(args):
                         chunk_end_time = min(chunk_start_time + timedelta(minutes=minutes_to_process_in_this_pass) - timedelta(seconds=1), current_hour_end_dt)
 
                         chunk_duration_minutes = int((chunk_end_time - chunk_start_time + timedelta(seconds=1)).total_seconds() / 60)
-
+                        
                         if chunk_duration_minutes < 60:
                             marker_granularity = "minute"
                         else:
                             marker_granularity = "hour"
-
+                        
                         job_marker_suffix = generate_time_suffix(chunk_start_time, marker_granularity)
 
-                        # Prepare arguments for the task function
                         task_args = (
                             exporter, args.sumo_query, chunk_start_time, chunk_end_time,
                             job_marker_suffix, args.max_messages_per_file, args.messages_per_api_request,
@@ -838,16 +869,20 @@ def run_export(args):
                             args.base_output_directory, args.file_prefix, args.output_granularity,
                             args.overwrite_archive_file_if_exists, args.if_zero_messages_skip_file_write,
                             args.adaptive_shrink_consecutive_count, args.adaptive_grow_trigger_message_percent,
-                            args.adaptive_grow_consecutive_count, compressor,
+                            args.adaptive_grow_consecutive_count, 
+                            args.compression_format, # Pass compression format
+                            zstd_compressor, # Pass zstd compressor (will be None if not zstd)
+                            args.gzip_compression_level, # Pass gzip level
+                            args.lz4_compression_level, # Pass lz4 level
                             args.db_path, query_hash, current_optimal_minutes_for_this_hour,
                             minutes_to_process_in_this_pass,
                             split_intervals_parsed,
-                            0 # Initial depth for top-level tasks
+                            0
                         )
                         tasks_to_queue.append(task_args)
 
     log.info(f"Prepared {len(tasks_to_queue)} initial tasks for data export.")
-
+    
     exported_messages_total = 0
     split_tasks_total = 0
     skipped_tasks_total = 0
@@ -855,10 +890,10 @@ def run_export(args):
     if tasks_to_queue:
         with ThreadPoolExecutor(max_workers=args.max_concurrent_api_calls) as executor:
             futures = {executor.submit(process_query_chunk_recursive, *task_args): task_args for task_args in tasks_to_queue}
-
+            
             for i, future in enumerate(as_completed(futures), 1):
                 original_task_args = futures[future]
-                chunk_start_time = original_task_args[2] # Extract chunk_start_time for logging
+                chunk_start_time = original_task_args[2]
 
                 try:
                     messages_count, was_split, was_skipped = future.result()
@@ -942,7 +977,7 @@ def main():
                         help=f"Path to the SQLite database file for storing optimal chunk sizes. Default: {DEFAULT_DB_PATH}")
     parser.add_argument("--log-file", type=str,
                         help="Path to a file where logs will be written in addition to console output.")
-
+    
     parser.add_argument("--api-retry-initial-delay-seconds", type=int, default=DEFAULT_API_RETRY_INITIAL_DELAY_SECONDS,
                         help=f"Initial delay for API call retries in seconds. Default: {DEFAULT_API_RETRY_INITIAL_DELAY_SECONDS}")
     parser.add_argument("--api-retry-max-delay-seconds", type=int, default=DEFAULT_API_RETRY_MAX_DELAY_SECONDS,
@@ -952,11 +987,22 @@ def main():
     parser.add_argument("--api-retry-backoff-factor", type=int, default=DEFAULT_API_RETRY_BACKOFF_FACTOR,
                         help=f"Factor by which to increase the delay between API retries (e.g., 2 for exponential). Default: {DEFAULT_API_RETRY_BACKOFF_FACTOR}")
 
+    # New compression arguments
+    parser.add_argument("--compression-format", type=str, choices=['zstd', 'gzip', 'lz4', 'none'], default=DEFAULT_COMPRESSION_FORMAT,
+                        help=f"Choose compression format for output files. 'none' for plain JSON. Default: '{DEFAULT_COMPRESSION_FORMAT}'")
+    parser.add_argument("--zstd-compression-level", type=int, default=DEFAULT_ZSTD_COMPRESSION_LEVEL,
+                        help=f"Compression level for Zstandard (1-22). Default: {DEFAULT_ZSTD_COMPRESSION_LEVEL}")
+    parser.add_argument("--gzip-compression-level", type=int, default=DEFAULT_GZIP_COMPRESSION_LEVEL,
+                        help=f"Compression level for Gzip (1-9, 9 is best compression). Default: {DEFAULT_GZIP_COMPRESSION_LEVEL}")
+    parser.add_argument("--lz4-compression-level", type=int, default=DEFAULT_LZ4_COMPRESSION_LEVEL,
+                        help=f"Compression level for LZ4 (0-16, 0 is fastest/default). Default: {DEFAULT_LZ4_COMPRESSION_LEVEL}")
+
+
     args = parser.parse_args()
 
-    for handler in log.handlers[:]:
+    for handler in log.handlers[:]: 
         log.removeHandler(handler)
-    log.propagate = False
+    log.propagate = False 
 
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
@@ -966,12 +1012,6 @@ def main():
         file_handler = logging.FileHandler(args.log_file)
         file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         log.addHandler(file_handler)
-
-    # Add file_prefix to base dir for root stroage directory uniqueness
-    if args.base_output_directory:
-        args.base_output_directory = f"{args.base_output_directory}/{args.file_prefix}"
-        print(args.base_output_directory)
-        time.sleep(10)
 
     if args.months:
         args.months = [m.lower() for m in args.months]
@@ -983,6 +1023,8 @@ def main():
     log.info(f"🗃️ Optimal chunks DB will be used at: {args.db_path}")
     log.info(f"⚡ Max concurrent API calls (ThreadPoolExecutor workers): {args.max_concurrent_api_calls}")
     log.info(f"♻️ API Retry Policy: Initial Delay={args.api_retry_initial_delay_seconds}s, Max Delay={args.api_retry_max_delay_seconds}s, Max Retries={args.api_max_retries}, Backoff Factor={args.api_retry_backoff_factor}")
+    log.info(f"💾 Output Compression: {args.compression_format.upper()} (ZSTD Level: {args.zstd_compression_level}, GZIP Level: {args.gzip_compression_level}, LZ4 Level: {args.lz4_compression_level})")
+
 
     run_export(args)
 
