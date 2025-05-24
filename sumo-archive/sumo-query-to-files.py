@@ -21,7 +21,7 @@ from requests.exceptions import RequestException, HTTPError
 
 # --- Configuration Constants ---
 DEFAULT_MESSAGES_PER_API_REQUEST = 10000
-DEFAULT_JOB_POLL_INITIAL_DELAY_SECONDS = 5
+DEFAULT_JOB_POLL_INITIAL_DELAY_SECONDS = 1
 DEFAULT_JOB_POLL_MAX_RETRIES = 60
 DEFAULT_JOB_POLL_RETRY_INTERVAL_SECONDS = 10
 DEFAULT_MAX_MESSAGES_PER_FILE = 100000
@@ -42,7 +42,7 @@ DEFAULT_API_RETRY_BACKOFF_FACTOR = 2 # Exponential backoff (delay * factor)
 # --- New Compression Constants ---
 DEFAULT_COMPRESSION_FORMAT: Literal['zstd', 'gzip', 'lz4', 'none'] = 'zstd' # Default to zstd
 DEFAULT_ZSTD_COMPRESSION_LEVEL = 3
-DEFAULT_GZIP_COMPRESSION_LEVEL = 3 # 1-9, 9 is best
+DEFAULT_GZIP_COMPRESSION_LEVEL = 5 # 1-9, 9 is best
 DEFAULT_LZ4_COMPRESSION_LEVEL = 0 # 0-16, 0 is default/fastest, 16 is best
 
 # --- Logging Setup ---
@@ -160,7 +160,7 @@ class SumoExporter:
             self.endpoint = endpoint.rstrip('/') + "/api/v1"
         else:
             self.endpoint = endpoint
-            
+
         self.dry_run = dry_run
         self.headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
         self.session = requests.Session()
@@ -173,7 +173,7 @@ class SumoExporter:
 
     def _make_request(self, method: str, path: str, **kwargs) -> Dict[str, Any]:
         url = f"{self.endpoint}{path}"
-        
+
         for attempt in range(self.api_max_retries):
             log.debug(f"Making {method} request to {url} (Attempt {attempt + 1}/{self.api_max_retries}) with kwargs: {kwargs}")
             try:
@@ -311,7 +311,7 @@ def build_output_path(base_output_directory: str, file_prefix: str, output_granu
                  tzinfo=timezone.utc),
         output_granularity
     )
-    
+
     extension = ".json"
     if compression_format == 'zstd':
         extension += ".zst"
@@ -394,13 +394,13 @@ def write_messages_to_files(messages: List[Dict[str, Any]],
     grouped_messages = {}
     for msg in messages:
         msg_timestamp_ms = msg.get('_messagetime')
-        
+
         if msg_timestamp_ms is None:
             log.debug(f"'_messagetime' not found for message, using current UTC time. Message: {msg}")
             msg_dt = datetime.now(timezone.utc)
         else:
             try:
-                msg_timestamp_ms = int(msg_timestamp_ms) 
+                msg_timestamp_ms = int(msg_timestamp_ms)
                 msg_dt = datetime.fromtimestamp(msg_timestamp_ms / 1000, tz=timezone.utc)
             except (ValueError, TypeError):
                 log.warning(f"Could not parse '_messagetime' '{msg_timestamp_ms}' for message. Using current UTC time. Message: {msg}")
@@ -424,7 +424,7 @@ def write_messages_to_files(messages: List[Dict[str, Any]],
             raise ValueError(f"Unsupported output granularity: {output_granularity}")
 
         key = generate_time_suffix(key_dt, output_granularity)
-        
+
         if key not in grouped_messages:
             grouped_messages[key] = {
                 'year': current_year,
@@ -514,9 +514,9 @@ def process_query_chunk_recursive(
     split_intervals: List[int],
     depth: int = 0
 ) -> Tuple[int, bool, bool]:
-    
+
     db = OptimalChunksDB(db_path) # Always create a new DB connection for this thread/task
-    
+
     indent = "    " * depth
     job_id = None
     messages_count_for_chunk = 0
@@ -531,14 +531,14 @@ def process_query_chunk_recursive(
                 compression_format, # Pass compression_format to path generation
                 chunk_start_time, chunk_end_time
             )
-            
-            if expected_files: 
+
+            if expected_files:
                 all_expected_files_exist = True
                 for fpath in expected_files:
                     if not os.path.exists(fpath):
                         all_expected_files_exist = False
                         break
-                
+
                 if all_expected_files_exist:
                     log.info(f"{indent}✅ All expected files for chunk {job_marker_suffix} already exist. Skipping Sumo Logic query.")
                     return 0, False, True
@@ -578,7 +578,7 @@ def process_query_chunk_recursive(
                 if interval_minutes < current_duration_minutes and interval_minutes >= 1:
                     new_split_duration_minutes = interval_minutes
                     break
-            
+
             split_granularity_duration = timedelta(minutes=new_split_duration_minutes)
 
             if new_split_duration_minutes == current_duration_minutes or current_duration_minutes == 1:
@@ -587,7 +587,7 @@ def process_query_chunk_recursive(
                 messages = list(exporter.stream_job_messages(job_id, messages_per_api_request, max_messages_to_fetch=messages_to_fetch))
                 write_messages_to_files(
                     messages, base_output_directory, file_prefix, output_granularity,
-                    if_zero_messages_skip_file_write, overwrite_archive_file_if_exists, 
+                    if_zero_messages_skip_file_write, overwrite_archive_file_if_exists,
                     compression_format, zstd_compressor, gzip_compression_level, lz4_compression_level, # Pass compression args
                     dry_run=exporter.dry_run
                 )
@@ -608,7 +608,7 @@ def process_query_chunk_recursive(
                          marker_granularity = "minute"
                     else:
                          marker_granularity = "hour"
-                    
+
                     sub_job_marker_suffix = generate_time_suffix(sub_chunk_start, marker_granularity)
 
                     sub_messages_count, sub_was_split, sub_was_skipped = process_query_chunk_recursive(
@@ -618,7 +618,7 @@ def process_query_chunk_recursive(
                         base_output_directory, file_prefix, output_granularity,
                         overwrite_archive_file_if_exists, if_zero_messages_skip_file_write,
                         adaptive_shrink_consecutive_count, adaptive_grow_trigger_message_percent,
-                        adaptive_grow_consecutive_count, 
+                        adaptive_grow_consecutive_count,
                         compression_format, zstd_compressor, gzip_compression_level, lz4_compression_level, # Pass compression args
                         db_path, query_hash, optimal_minutes_for_hour,
                         new_split_duration_minutes,
@@ -640,7 +640,7 @@ def process_query_chunk_recursive(
                 messages = list(exporter.stream_job_messages(job_id, messages_per_api_request, max_messages_to_fetch=messages_count_for_chunk))
                 write_messages_to_files(
                     messages, base_output_directory, file_prefix, output_granularity,
-                    if_zero_messages_skip_file_write, overwrite_archive_file_if_exists, 
+                    if_zero_messages_skip_file_write, overwrite_archive_file_if_exists,
                     compression_format, zstd_compressor, gzip_compression_level, lz4_compression_level, # Pass compression args
                     dry_run=exporter.dry_run
                 )
@@ -668,14 +668,14 @@ def process_query_chunk_recursive(
             db.update_adaptive_metrics(query_hash, dt_for_metrics,
                                                       over_limit_increment=1, reset_under=True)
             new_over_count, _ = db.get_adaptive_metrics(query_hash, dt_for_metrics)
-            
+
             if new_over_count >= adaptive_shrink_consecutive_count and optimal_minutes_for_hour > min(split_intervals):
                 new_optimal_minutes = min(split_intervals)
                 for interval in sorted(split_intervals, reverse=True):
                     if interval < optimal_minutes_for_hour:
                         new_optimal_minutes = interval
                         break
-                
+
                 log.info(f"{indent}Adaptive: Shrinking optimal chunk size for {dt_for_metrics.isoformat()} from {optimal_minutes_for_hour} to {new_optimal_minutes} minutes due to consecutive over-limit. Resetting over-limit count.")
                 db.set_optimal_chunk_minutes(query_hash, dt_for_metrics, new_optimal_minutes)
                 db.update_adaptive_metrics(query_hash, dt_for_metrics, reset_over=True)
@@ -692,7 +692,7 @@ def process_query_chunk_recursive(
                         if interval > optimal_minutes_for_hour:
                             new_optimal_minutes = interval
                             break
-                    
+
                     log.info(f"{indent}Adaptive: Growing optimal chunk size for {dt_for_metrics.isoformat()} from {optimal_minutes_for_hour} to {new_optimal_minutes} minutes due to consecutive under-limit. Resetting under-limit count.")
                     db.set_optimal_chunk_minutes(query_hash, dt_for_metrics, new_optimal_minutes)
                     db.update_adaptive_metrics(query_hash, dt_for_metrics, reset_under=True)
@@ -715,7 +715,7 @@ def find_optimal_chunk_size(
     log.info(f"🔍 Determining optimal chunk size for query hash (partial), starting at {search_start_time.isoformat()} (max {max_minutes_for_search_window} min search window)")
 
     current_test_chunk_size_minutes = max_minutes_for_search_window
-    
+
     if current_test_chunk_size_minutes == 0:
         current_test_chunk_size_minutes = 1
 
@@ -770,19 +770,19 @@ def run_export(args):
         raise ValueError("Sumo Logic Access ID not provided. Use --sumo-access-id or set SUMO_ACCESS_ID environment variable.")
     if not sumo_access_key:
         raise ValueError("Sumo Logic Access Key not provided. Use --sumo-access-key or set SUMO_ACCESS_KEY environment variable.")
-    
+
     exporter = SumoExporter(
-        access_id=sumo_access_id, 
-        access_key=sumo_access_key, 
-        endpoint=sumo_api_endpoint, 
+        access_id=sumo_access_id,
+        access_key=sumo_access_key,
+        endpoint=sumo_api_endpoint,
         dry_run=args.dry_run,
         api_retry_initial_delay=args.api_retry_initial_delay_seconds,
         api_retry_max_delay=args.api_retry_max_delay_seconds,
         api_max_retries=args.api_max_retries,
         api_retry_backoff_factor=args.api_retry_backoff_factor
-    ) 
+    )
     query_hash = get_query_hash(args.sumo_query)
-    
+
     # Initialize compressor based on selection
     zstd_compressor = None
     if args.compression_format == 'zstd':
@@ -811,7 +811,7 @@ def run_export(args):
         for month_num, month_abbr in enumerate(calendar.month_abbr):
             if month_num == 0 or month_abbr.lower() not in target_months:
                 continue
-            
+
             if target_days:
                 days_in_month = [d for d in target_days if 1 <= d <= calendar.monthrange(year, month_num)[1]]
             else:
@@ -833,7 +833,7 @@ def run_export(args):
                             current_optimal_minutes_for_this_hour = find_optimal_chunk_size(
                                 exporter, args.sumo_query, current_hour_start_dt,
                                 max_search_window_minutes, args.max_messages_per_file,
-                                args.job_poll_initial_delay_seconds, 
+                                args.job_poll_initial_delay_seconds,
                                 dry_run=args.dry_run
                             )
                             db_to_save_optimal = OptimalChunksDB(args.db_path)
@@ -854,12 +854,12 @@ def run_export(args):
                         chunk_end_time = min(chunk_start_time + timedelta(minutes=minutes_to_process_in_this_pass) - timedelta(seconds=1), current_hour_end_dt)
 
                         chunk_duration_minutes = int((chunk_end_time - chunk_start_time + timedelta(seconds=1)).total_seconds() / 60)
-                        
+
                         if chunk_duration_minutes < 60:
                             marker_granularity = "minute"
                         else:
                             marker_granularity = "hour"
-                        
+
                         job_marker_suffix = generate_time_suffix(chunk_start_time, marker_granularity)
 
                         task_args = (
@@ -869,7 +869,7 @@ def run_export(args):
                             args.base_output_directory, args.file_prefix, args.output_granularity,
                             args.overwrite_archive_file_if_exists, args.if_zero_messages_skip_file_write,
                             args.adaptive_shrink_consecutive_count, args.adaptive_grow_trigger_message_percent,
-                            args.adaptive_grow_consecutive_count, 
+                            args.adaptive_grow_consecutive_count,
                             args.compression_format, # Pass compression format
                             zstd_compressor, # Pass zstd compressor (will be None if not zstd)
                             args.gzip_compression_level, # Pass gzip level
@@ -882,7 +882,7 @@ def run_export(args):
                         tasks_to_queue.append(task_args)
 
     log.info(f"Prepared {len(tasks_to_queue)} initial tasks for data export.")
-    
+
     exported_messages_total = 0
     split_tasks_total = 0
     skipped_tasks_total = 0
@@ -890,7 +890,7 @@ def run_export(args):
     if tasks_to_queue:
         with ThreadPoolExecutor(max_workers=args.max_concurrent_api_calls) as executor:
             futures = {executor.submit(process_query_chunk_recursive, *task_args): task_args for task_args in tasks_to_queue}
-            
+
             for i, future in enumerate(as_completed(futures), 1):
                 original_task_args = futures[future]
                 chunk_start_time = original_task_args[2]
@@ -977,7 +977,7 @@ def main():
                         help=f"Path to the SQLite database file for storing optimal chunk sizes. Default: {DEFAULT_DB_PATH}")
     parser.add_argument("--log-file", type=str,
                         help="Path to a file where logs will be written in addition to console output.")
-    
+
     parser.add_argument("--api-retry-initial-delay-seconds", type=int, default=DEFAULT_API_RETRY_INITIAL_DELAY_SECONDS,
                         help=f"Initial delay for API call retries in seconds. Default: {DEFAULT_API_RETRY_INITIAL_DELAY_SECONDS}")
     parser.add_argument("--api-retry-max-delay-seconds", type=int, default=DEFAULT_API_RETRY_MAX_DELAY_SECONDS,
@@ -1000,13 +1000,17 @@ def main():
 
     args = parser.parse_args()
 
-    for handler in log.handlers[:]: 
+    for handler in log.handlers[:]:
         log.removeHandler(handler)
-    log.propagate = False 
+    log.propagate = False
 
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
     log.addHandler(console_handler)
+
+    if args.base_output_directory:
+        args.base_output_directory = f"{args.base_output_directory}/{args.file_prefix}"
+        print(args.base_output_directory)
 
     if args.log_file:
         file_handler = logging.FileHandler(args.log_file)
