@@ -8,9 +8,10 @@ import sqlite3
 import time
 import zstandard
 import threading
-import math # Import math for ceil and exp
+import math
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Tuple, Optional, Set
+from concurrent.futures import ThreadPoolExecutor, as_completed # Import these
 
 import requests
 from requests.exceptions import RequestException, HTTPError
@@ -27,7 +28,7 @@ DEFAULT_ADAPTIVE_GROW_TRIGGER_MESSAGE_PERCENT = 0.5
 DEFAULT_ADAPTIVE_GROW_CONSECUTIVE_COUNT = 5
 DEFAULT_SPLIT_INTERVALS = "60,30,15,5,1"
 DEFAULT_DB_PATH = "trun.db"
-DEFAULT_MAX_CONCURRENT_API_CALLS = 5
+DEFAULT_MAX_CONCURRENT_API_CALLS = 5 # Renamed to reflect its use as ThreadPoolExecutor max_workers
 
 # --- New Backoff Constants ---
 DEFAULT_API_RETRY_INITIAL_DELAY_SECONDS = 1
@@ -37,7 +38,7 @@ DEFAULT_API_RETRY_BACKOFF_FACTOR = 2 # Exponential backoff (delay * factor)
 
 # --- Logging Setup ---
 log = logging.getLogger(__name__)
-log.setLevel(logging.INFO) # Default level, can be overridden by user args
+log.setLevel(logging.INFO)
 
 # --- Helper for Environment Variables ---
 def get_env_var(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -52,10 +53,14 @@ def must_env(name: str) -> str:
     return value
 
 # --- Database Setup (for optimal chunk sizes) ---
+# IMPORTANT: For ThreadPoolExecutor, sqlite3 connections are NOT thread-safe by default.
+# It's safer to open a new connection for each thread's task, or use threading.local()
+# to store a connection unique to that thread. For simplicity here, we'll ensure
+# OptimalChunksDB is instantiated per task where it needs to write/read.
 class OptimalChunksDB:
     def __init__(self, db_path: str = DEFAULT_DB_PATH):
         self.db_path = db_path
-        self.conn = sqlite3.connect(db_path)
+        self.conn = sqlite3.connect(db_path, timeout=30.0) # Add timeout for concurrent access
         self.cursor = self.conn.cursor()
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS optimal_chunks (
@@ -146,56 +151,52 @@ class SumoExporter:
                  api_max_retries: int = DEFAULT_API_MAX_RETRIES,
                  api_retry_backoff_factor: int = DEFAULT_API_RETRY_BACKOFF_FACTOR):
         self.auth = (access_id, access_key)
-        # Ensure endpoint ends with /api/v1 if not already present
         if not endpoint.endswith("/api/v1"):
             self.endpoint = endpoint.rstrip('/') + "/api/v1"
         else:
             self.endpoint = endpoint
-            
+
         self.dry_run = dry_run
         self.headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
-        self.session = requests.Session() # Use a session for connection pooling
+        self.session = requests.Session()
 
         self.api_retry_initial_delay = api_retry_initial_delay
         self.api_retry_max_delay = api_retry_max_delay
         self.api_max_retries = api_max_retries
         self.api_retry_backoff_factor = api_retry_backoff_factor
-        self.retry_on_status_codes = {429, 500, 502, 503, 504} # Add 5xx for general server errors
+        self.retry_on_status_codes = {429, 500, 502, 503, 504}
 
     def _make_request(self, method: str, path: str, **kwargs) -> Dict[str, Any]:
         url = f"{self.endpoint}{path}"
-        
+
         for attempt in range(self.api_max_retries):
             log.debug(f"Making {method} request to {url} (Attempt {attempt + 1}/{self.api_max_retries}) with kwargs: {kwargs}")
             try:
                 response = self.session.request(method, url, auth=self.auth, headers=self.headers, **kwargs)
-                response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+                response.raise_for_status()
                 return response.json()
             except HTTPError as e:
                 if e.response is not None and e.response.status_code in self.retry_on_status_codes and attempt < self.api_max_retries - 1:
                     delay = min(self.api_retry_initial_delay * (self.api_retry_backoff_factor ** attempt), self.api_retry_max_delay)
                     log.warning(f"API request failed with status {e.response.status_code}. Retrying in {delay:.2f} seconds. URL: {url}")
-                    log.debug(f"Response body: {e.response.text}") # Log body for debugging
+                    log.debug(f"Response body: {e.response.text}")
                     time.sleep(delay)
                 else:
                     log.error(f"API request failed after {attempt + 1} attempts: {e}")
                     if hasattr(e, 'response') and e.response is not None:
                         log.error(f"Response status: {e.response.status_code}")
                         log.error(f"Response body: {e.response.text}")
-                    raise # Re-raise if not retryable or max retries reached
+                    raise
             except RequestException as e:
                 log.error(f"API request failed (non-HTTP error): {e}")
-                raise # Re-raise for other request exceptions
+                raise
 
-        # This part should ideally not be reached if max_retries is handled correctly
-        # but is here for robustness.
         raise RequestException(f"API request failed after {self.api_max_retries} attempts.")
-
 
     def create_search_job(self, query: str, from_time: datetime, to_time: datetime) -> str:
         if self.dry_run:
             log.info(f"[Dry Run] Creating job for query: {query}, {from_time.isoformat()} to {to_time.isoformat()}")
-            return f"DRYRUN_JOB_{int(time.time())}"
+            return f"DRYRUN_JOB_{int(time.time())}_{threading.get_ident()}" # Add thread ID for uniqueness
 
         data = {
             "query": query,
@@ -212,7 +213,7 @@ class SumoExporter:
 
     def get_job_status(self, job_id: str) -> Dict[str, Any]:
         if self.dry_run and "DRYRUN_JOB_" in job_id:
-            time.sleep(1)
+            time.sleep(0.1) # Simulate some network latency
             return {"state": "DONE GATHERING RESULTS", "messageCount": 0, "recordCount": 0}
 
         return self._make_request("GET", f"/search/jobs/{job_id}")
@@ -256,8 +257,6 @@ class SumoExporter:
         if self.dry_run and "DRYRUN_JOB_" in job_id:
             log.info(f"[Dry Run] Deleting job: {job_id}")
             return
-        # Deletion attempts should also have some retry logic, but usually simpler
-        # For simplicity, we'll use the general _make_request which now includes backoff
         self._make_request("DELETE", f"/search/jobs/{job_id}")
         log.info(f"🗑️ Deleted Sumo Logic job: {job_id}")
 
@@ -265,7 +264,6 @@ class SumoExporter:
 def generate_time_suffix(dt: datetime, granularity: str) -> str:
     """Generates a time suffix for filenames based on granularity."""
     if granularity == "minute":
-        # Modified to include 'M' prefix for minutes
         return dt.strftime("%Y%b%dH%HM%M")
     elif granularity == "hour":
         return dt.strftime("%Y%b%dH%H")
@@ -295,13 +293,9 @@ def build_output_path(base_output_directory: str, file_prefix: str, output_granu
             output_dir_path = os.path.join(output_dir_path, f"{current_day:02d}")
             if output_granularity in ["minute", "hour"]:
                 output_dir_path = os.path.join(output_dir_path, f"H{current_hour:02d}")
-                # No separate directory for minute, as it's part of the filename suffix
-                # if output_granularity == "minute":
-                #     output_dir_path = os.path.join(output_dir_path, f"M{current_minute:02d}")
 
     os.makedirs(output_dir_path, exist_ok=True)
 
-    # Use the generate_time_suffix with the specific datetime object for this file
     filename_time_suffix = generate_time_suffix(
         datetime(current_year,
                  current_month_num,
@@ -329,7 +323,6 @@ def get_expected_file_paths_for_range(
     expected_files = set()
     current_dt = chunk_start_time
 
-    # Determine the step size based on output_granularity
     if output_granularity == "minute":
         step_delta = timedelta(minutes=1)
     elif output_granularity == "hour":
@@ -337,8 +330,7 @@ def get_expected_file_paths_for_range(
     elif output_granularity == "day":
         step_delta = timedelta(days=1)
     elif output_granularity == "month":
-        # Month step is more complex, handle below
-        step_delta = timedelta(days=1) # Initial dummy, will adjust
+        step_delta = timedelta(days=1)
     else:
         raise ValueError(f"Unsupported output granularity for file path check: {output_granularity}")
 
@@ -349,28 +341,19 @@ def get_expected_file_paths_for_range(
         current_hour = current_dt.hour if output_granularity in ["minute", "hour"] else 0
         current_minute = current_dt.minute if output_granularity == "minute" else 0
 
-        # build_output_path handles directory creation and filename suffix correctly
-        # We only need the full file_path here.
         _, file_path = build_output_path(
             base_output_directory, file_prefix, output_granularity,
             current_year, current_month_abbr, current_day, current_hour, current_minute
         )
         expected_files.add(file_path)
 
-        # Advance current_dt based on granularity
         if output_granularity == "month":
-            # For month, increment month by month, handling year rollover
             if current_dt.month == 12:
                 current_dt = current_dt.replace(year=current_dt.year + 1, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
             else:
                 current_dt = current_dt.replace(month=current_dt.month + 1, day=1, hour=0, minute=0, second=0, microsecond=0)
         else:
             current_dt += step_delta
-            # Ensure we don't go past chunk_end_time's minute/hour/day if step is larger
-            # This is implicitly handled by the while loop condition `current_dt <= chunk_end_time`
-            # and by the fact that `build_output_path` uses the `current_dt`
-            # The only edge case is if step_delta causes current_dt to jump way past chunk_end_time
-            # before the loop finishes, which is fine, as it won't add more files.
 
     return expected_files
 
@@ -390,13 +373,13 @@ def write_messages_to_files(messages: List[Dict[str, Any]],
     grouped_messages = {}
     for msg in messages:
         msg_timestamp_ms = msg.get('_messagetime')
-        
+
         if msg_timestamp_ms is None:
             log.debug(f"'_messagetime' not found for message, using current UTC time. Message: {msg}")
             msg_dt = datetime.now(timezone.utc)
         else:
             try:
-                msg_timestamp_ms = int(msg_timestamp_ms) 
+                msg_timestamp_ms = int(msg_timestamp_ms)
                 msg_dt = datetime.fromtimestamp(msg_timestamp_ms / 1000, tz=timezone.utc)
             except (ValueError, TypeError):
                 log.warning(f"Could not parse '_messagetime' '{msg_timestamp_ms}' for message. Using current UTC time. Message: {msg}")
@@ -408,7 +391,6 @@ def write_messages_to_files(messages: List[Dict[str, Any]],
         current_hour = msg_dt.hour
         current_minute = msg_dt.minute
 
-        # Key by the appropriate granularity for grouping messages into files
         if output_granularity == "minute":
             key_dt = datetime(current_year, msg_dt.month, current_day, current_hour, current_minute, tzinfo=timezone.utc)
         elif output_granularity == "hour":
@@ -420,13 +402,12 @@ def write_messages_to_files(messages: List[Dict[str, Any]],
         else:
             raise ValueError(f"Unsupported output granularity: {output_granularity}")
 
-        # Use the specific datetime object for the key to ensure correct suffix generation
         key = generate_time_suffix(key_dt, output_granularity)
-        
+
         if key not in grouped_messages:
             grouped_messages[key] = {
                 'year': current_year,
-                'month_abbr': calendar.month_abbr[key_dt.month], # Use key_dt's month
+                'month_abbr': calendar.month_abbr[key_dt.month],
                 'day': key_dt.day,
                 'hour': key_dt.hour,
                 'minute': key_dt.minute,
@@ -462,7 +443,9 @@ def write_messages_to_files(messages: List[Dict[str, Any]],
             log.error(f"Error writing to file {file_path}: {e}")
 
 # --- Core Logic for Processing Chunks ---
-def process_query_chunk(
+# This function will be called by ThreadPoolExecutor
+# All necessary arguments must be passed explicitly.
+def process_query_chunk_recursive(
     exporter: SumoExporter,
     sumo_query: str,
     chunk_start_time: datetime,
@@ -480,13 +463,19 @@ def process_query_chunk(
     adaptive_grow_trigger_message_percent: float,
     adaptive_grow_consecutive_count: int,
     compressor: zstandard.ZstdCompressor,
-    optimal_chunks_db: Optional[OptimalChunksDB],
+    db_path: str, # Pass db_path instead of db object
     query_hash: Optional[str],
-    optimal_minutes_for_hour: Optional[int], # This is the "parent" optimal minutes
-    current_optimal_minutes_for_this_chunk: int, # This is the optimal minutes for the current chunk being processed
+    optimal_minutes_for_hour: Optional[int], # This is the "parent" optimal minutes (for the *original* hour)
+    current_optimal_minutes_for_this_chunk: int, # This is the optimal minutes for the *current* chunk being processed
     split_intervals: List[int],
     depth: int = 0
 ) -> Tuple[int, bool, bool]:
+
+    # Open DB connection in this thread if needed for adaptive logic
+    # This ensures thread-safety for SQLite
+    # db = OptimalChunksDB(db_path) if optimal_chunks_db is not None else None # Reuse the existing name `db` for context
+    db = OptimalChunksDB(db_path) # Always create a new DB connection for this thread/task
+
     indent = "    " * depth
     job_id = None
     messages_count_for_chunk = 0
@@ -494,28 +483,24 @@ def process_query_chunk(
     was_skipped = False
     query_executed = False
 
-    # --- FILE EXISTENCE CHECK ---
-    if not overwrite_archive_file_if_exists:
-        expected_files = get_expected_file_paths_for_range(
-            base_output_directory, file_prefix, output_granularity,
-            chunk_start_time, chunk_end_time
-        )
-        
-        # Only check if expected_files is not empty. If it's empty, it means the time range is invalid
-        # or the granularity makes no sense for the time range (e.g. asking for minute files over a 0-duration span).
-        # An empty set of expected files should not cause a skip.
-        if expected_files: 
-            all_expected_files_exist = True
-            for fpath in expected_files:
-                if not os.path.exists(fpath):
-                    all_expected_files_exist = False
-                    break
-            
-            if all_expected_files_exist: # Ensure there's at least one file to check
-                log.info(f"{indent}✅ All expected files for chunk {job_marker_suffix} already exist. Skipping Sumo Logic query.")
-                return 0, False, True # 0 messages, not split, was skipped
-
     try:
+        if not overwrite_archive_file_if_exists:
+            expected_files = get_expected_file_paths_for_range(
+                base_output_directory, file_prefix, output_granularity,
+                chunk_start_time, chunk_end_time
+            )
+
+            if expected_files:
+                all_expected_files_exist = True
+                for fpath in expected_files:
+                    if not os.path.exists(fpath):
+                        all_expected_files_exist = False
+                        break
+
+                if all_expected_files_exist:
+                    log.info(f"{indent}✅ All expected files for chunk {job_marker_suffix} already exist. Skipping Sumo Logic query.")
+                    return 0, False, True
+
         job_id = exporter.create_search_job(sumo_query, chunk_start_time, chunk_end_time)
         query_executed = True
 
@@ -544,52 +529,50 @@ def process_query_chunk(
             log.info(f"{indent}Messages ({messages_count_for_chunk}) exceed max_messages_per_file ({max_messages_per_file}). Splitting chunk.")
             was_split = True
 
-            new_split_duration_minutes = 1 # Fallback to 1 if no suitable interval found
+            new_split_duration_minutes = 1
             current_duration_minutes = int(duration.total_seconds() / 60)
 
-            # Find the largest split interval that is smaller than the current duration
             for interval_minutes in split_intervals:
                 if interval_minutes < current_duration_minutes and interval_minutes >= 1:
                     new_split_duration_minutes = interval_minutes
                     break
-            
+
             split_granularity_duration = timedelta(minutes=new_split_duration_minutes)
 
             if new_split_duration_minutes == current_duration_minutes or current_duration_minutes == 1:
                 log.warning(f"{indent}⚠️ Chunk {job_marker_suffix} ({chunk_start_time.isoformat()} → {chunk_end_time.isoformat()}) is at minimum effective granularity ({current_duration_minutes} min) but has {messages_count_for_chunk} messages (limit {max_messages_per_file}). Writing first {max_messages_per_file} messages.")
-                # When at min granularity but still over limit, just fetch and write what we can
-                messages_to_fetch = min(messages_count_for_chunk, max_messages_per_file) # Fetch up to max_messages_per_file
+                messages_to_fetch = min(messages_count_for_chunk, max_messages_per_file)
                 messages = list(exporter.stream_job_messages(job_id, messages_per_api_request, max_messages_to_fetch=messages_to_fetch))
                 write_messages_to_files(
                     messages, base_output_directory, file_prefix, output_granularity,
                     if_zero_messages_skip_file_write, overwrite_archive_file_if_exists, compressor, dry_run=exporter.dry_run
                 )
             else:
-                # Calculate number of sub-chunks based on the new split duration
-                # Use math.ceil for accurate division
                 num_sub_chunks = math.ceil(duration.total_seconds() / 60 / new_split_duration_minutes)
                 num_sub_chunks = int(max(1, num_sub_chunks))
 
-                messages_sum_from_subchunks = 0 # To accumulate messages from recursive calls
+                messages_sum_from_subchunks = 0
 
+                # When splitting, we'll recursively call process_query_chunk_recursive.
+                # These recursive calls will run within the *same* thread as the current call.
+                # If we wanted to submit sub-chunks to the thread pool, we'd need to pass the executor
+                # down, which can complicate the recursive structure and might not be beneficial
+                # if the goal is to manage top-level hourly concurrency.
                 for i in range(num_sub_chunks):
                     sub_chunk_start = chunk_start_time + i * split_granularity_duration
-                    if sub_chunk_start > chunk_end_time: # Stop if sub-chunk start exceeds parent end
+                    if sub_chunk_start > chunk_end_time:
                         break
 
-                    # Ensure sub_chunk_end doesn't go past parent chunk_end_time
                     sub_chunk_end = min(sub_chunk_start + split_granularity_duration - timedelta(seconds=1), chunk_end_time)
 
-                    # Determine marker granularity for sub-jobs
                     if new_split_duration_minutes < 60:
                          marker_granularity = "minute"
                     else:
                          marker_granularity = "hour"
-                    
+
                     sub_job_marker_suffix = generate_time_suffix(sub_chunk_start, marker_granularity)
 
-
-                    sub_messages_count, sub_was_split, sub_was_skipped = process_query_chunk(
+                    sub_messages_count, sub_was_split, sub_was_skipped = process_query_chunk_recursive(
                         exporter, sumo_query, sub_chunk_start, sub_chunk_end,
                         sub_job_marker_suffix, max_messages_per_file, messages_per_api_request,
                         poll_initial_delay,
@@ -597,24 +580,23 @@ def process_query_chunk(
                         overwrite_archive_file_if_exists, if_zero_messages_skip_file_write,
                         adaptive_shrink_consecutive_count, adaptive_grow_trigger_message_percent,
                         adaptive_grow_consecutive_count, compressor,
-                        optimal_chunks_db, query_hash, optimal_minutes_for_hour, # Pass parent optimal_minutes_for_hour
-                        new_split_duration_minutes, # Pass the new (smaller) optimal minutes for this sub-chunk
+                        db_path, query_hash, optimal_minutes_for_hour,
+                        new_split_duration_minutes,
                         split_intervals,
                         depth + 1
                     )
-                    messages_sum_from_subchunks += sub_messages_count # Sum messages from all sub-chunks
+                    messages_sum_from_subchunks += sub_messages_count
                     if sub_was_split:
                         was_split = True
                     if sub_was_skipped:
                         was_skipped = True
-                messages_count_for_chunk = messages_sum_from_subchunks # Update parent's count with sum of sub-chunks
+                messages_count_for_chunk = messages_sum_from_subchunks
 
         else: # messages_count_for_chunk <= max_messages_per_file
             if messages_count_for_chunk == 0 and if_zero_messages_skip_file_write:
                 log.info(f"{indent}📬 Received 0 messages for job {job_marker_suffix}. Skipping file write.")
                 was_skipped = True
             else:
-                # If messages are within limit, stream and write all of them
                 messages = list(exporter.stream_job_messages(job_id, messages_per_api_request, max_messages_to_fetch=messages_count_for_chunk))
                 write_messages_to_files(
                     messages, base_output_directory, file_prefix, output_granularity,
@@ -623,7 +605,7 @@ def process_query_chunk(
 
     except (RequestException, TimeoutError, ValueError) as e:
         log.error(f"{indent}Error processing job {job_marker_suffix}: {e}")
-        messages_count_for_chunk = 0 # Indicate failure for adaptive logic
+        messages_count_for_chunk = 0
 
     finally:
         if job_id and query_executed:
@@ -631,61 +613,53 @@ def process_query_chunk(
                 exporter.delete_search_job(job_id)
             except Exception as e:
                 log.error(f"{indent}Failed to delete Sumo Logic job {job_id}: {e}")
+        if db: # Close DB connection
+            db.close()
 
     # Adaptive logic for the _original_ hour-level chunk (depth == 0)
-    if optimal_chunks_db and query_hash and optimal_minutes_for_hour is not None and depth == 0:
+    # Ensure db object is valid if we're at depth 0
+    if db and query_hash and optimal_minutes_for_hour is not None and depth == 0:
         dt_for_metrics = datetime(chunk_start_time.year, chunk_start_time.month, chunk_start_time.day,
                                   chunk_start_time.hour, tzinfo=timezone.utc)
-        current_over_count, current_under_count = optimal_chunks_db.get_adaptive_metrics(query_hash, dt_for_metrics)
+        current_over_count, current_under_count = db.get_adaptive_metrics(query_hash, dt_for_metrics)
 
-        # For adaptive logic:
-        # If was_split is True, it means the *initial* job (or any sub-job that led to this recursive call chain)
-        # was too big and had to be broken down.
-        # This means the current_optimal_minutes_for_this_hour (the parent's optimal) might be too large.
-        if was_split: # This indicates the initial chunk was too large and triggered a split
-            optimal_chunks_db.update_adaptive_metrics(query_hash, dt_for_metrics,
+        if was_split:
+            db.update_adaptive_metrics(query_hash, dt_for_metrics,
                                                       over_limit_increment=1, reset_under=True)
-            new_over_count, _ = optimal_chunks_db.get_adaptive_metrics(query_hash, dt_for_metrics)
-            
+            new_over_count, _ = db.get_adaptive_metrics(query_hash, dt_for_metrics)
+
             if new_over_count >= adaptive_shrink_consecutive_count and optimal_minutes_for_hour > min(split_intervals):
-                # Find the next smallest interval in split_intervals
-                new_optimal_minutes = min(split_intervals) # Smallest possible fallback
-                for interval in sorted(split_intervals, reverse=True): # Iterate descending
+                new_optimal_minutes = min(split_intervals)
+                for interval in sorted(split_intervals, reverse=True):
                     if interval < optimal_minutes_for_hour:
                         new_optimal_minutes = interval
                         break
-                
+
                 log.info(f"{indent}Adaptive: Shrinking optimal chunk size for {dt_for_metrics.isoformat()} from {optimal_minutes_for_hour} to {new_optimal_minutes} minutes due to consecutive over-limit. Resetting over-limit count.")
-                optimal_chunks_db.set_optimal_chunk_minutes(query_hash, dt_for_metrics, new_optimal_minutes)
-                optimal_chunks_db.update_adaptive_metrics(query_hash, dt_for_metrics, reset_over=True)
+                db.set_optimal_chunk_minutes(query_hash, dt_for_metrics, new_optimal_minutes)
+                db.update_adaptive_metrics(query_hash, dt_for_metrics, reset_over=True)
 
-        elif not was_skipped and messages_count_for_chunk > 0: 
-            # If the original chunk was not split, and it had messages, we can evaluate for growth
-            # messages_count_for_chunk here represents the total messages for the *original* top-level chunk.
-            
+        elif not was_skipped and messages_count_for_chunk > 0:
             if messages_count_for_chunk <= max_messages_per_file * adaptive_grow_trigger_message_percent:
-                optimal_chunks_db.update_adaptive_metrics(query_hash, dt_for_metrics,
+                db.update_adaptive_metrics(query_hash, dt_for_metrics,
                                                           under_limit_increment=1, reset_over=True)
-                new_under_count, _ = optimal_chunks_db.get_adaptive_metrics(query_hash, dt_for_metrics)
+                new_under_count, _ = db.get_adaptive_metrics(query_hash, dt_for_metrics)
 
-                # Check if the current optimal_minutes_for_hour can actually grow
                 if new_under_count >= adaptive_grow_consecutive_count and optimal_minutes_for_hour < max(split_intervals):
-                    new_optimal_minutes = max(split_intervals) # Largest possible fallback
-                    # Find the smallest interval greater than current_optimal_minutes_for_this_hour
-                    for interval in sorted(split_intervals): # Iterate ascending
+                    new_optimal_minutes = max(split_intervals)
+                    for interval in sorted(split_intervals):
                         if interval > optimal_minutes_for_hour:
                             new_optimal_minutes = interval
                             break
-                    
-                    log.info(f"{indent}Adaptive: Growing optimal chunk size for {dt_for_metrics.isoformat()} from {optimal_minutes_for_hour} to {new_optimal_minutes} minutes due to consecutive under-limit. Resetting under-limit count.")
-                    optimal_chunks_db.set_optimal_chunk_minutes(query_hash, dt_for_metrics, new_optimal_minutes)
-                    optimal_chunks_db.update_adaptive_metrics(query_hash, dt_for_metrics, reset_under=True)
-            else: # If messages were within the "good" range or zero (and not skipped)
-                optimal_chunks_db.update_adaptive_metrics(query_hash, dt_for_metrics, reset_over=True, reset_under=True)
-        else: # Chunk was skipped (0 messages, or due to existing files) or was a failure scenario
-            optimal_chunks_db.update_adaptive_metrics(query_hash, dt_for_metrics, reset_over=True, reset_under=True)
 
-    # Return total messages yielded by this chunk (and its sub-chunks if split)
+                    log.info(f"{indent}Adaptive: Growing optimal chunk size for {dt_for_metrics.isoformat()} from {optimal_minutes_for_hour} to {new_optimal_minutes} minutes due to consecutive under-limit. Resetting under-limit count.")
+                    db.set_optimal_chunk_minutes(query_hash, dt_for_metrics, new_optimal_minutes)
+                    db.update_adaptive_metrics(query_hash, dt_for_metrics, reset_under=True)
+            else:
+                db.update_adaptive_metrics(query_hash, dt_for_metrics, reset_over=True, reset_under=True)
+        else:
+            db.update_adaptive_metrics(query_hash, dt_for_metrics, reset_over=True, reset_under=True)
+
     return messages_count_for_chunk, was_split, was_skipped
 
 def find_optimal_chunk_size(
@@ -697,15 +671,10 @@ def find_optimal_chunk_size(
     poll_initial_delay: int,
     dry_run: bool = False
 ) -> int:
-    """
-    Determines optimal chunk size in minutes for a given query and start time by iteratively testing.
-    This is typically used for initial discovery or re-evaluation.
-    """
     log.info(f"🔍 Determining optimal chunk size for query hash (partial), starting at {search_start_time.isoformat()} (max {max_minutes_for_search_window} min search window)")
 
     current_test_chunk_size_minutes = max_minutes_for_search_window
-    
-    # Ensure current_test_chunk_size_minutes is not 0
+
     if current_test_chunk_size_minutes == 0:
         current_test_chunk_size_minutes = 1
 
@@ -737,7 +706,6 @@ def find_optimal_chunk_size(
             if messages_count <= max_messages_per_file:
                 return current_test_chunk_size_minutes
 
-            # Shrink the test interval
             current_test_chunk_size_minutes //= 2
             if current_test_chunk_size_minutes == 0:
                 current_test_chunk_size_minutes = 1
@@ -747,7 +715,6 @@ def find_optimal_chunk_size(
             return 1
         finally:
             if job_id:
-                # The delete operation is also now handled by the _make_request with backoff
                 exporter.delete_search_job(job_id)
 
     return 1
@@ -756,33 +723,30 @@ def find_optimal_chunk_size(
 def run_export(args):
     sumo_access_id = args.sumo_access_id or get_env_var("SUMO_ACCESS_ID")
     sumo_access_key = args.sumo_access_key or get_env_var("SUMO_ACCESS_KEY")
-    sumo_api_endpoint = args.sumo_api_endpoint or get_env_var("SUMO_API_ENDPOINT", "https://api.sumologic.com") # Use root URL, SumoExporter will add /api/v1
+    sumo_api_endpoint = args.sumo_api_endpoint or get_env_var("SUMO_API_ENDPOINT", "https://api.sumologic.com")
 
     if not sumo_access_id:
         raise ValueError("Sumo Logic Access ID not provided. Use --sumo-access-id or set SUMO_ACCESS_ID environment variable.")
     if not sumo_access_key:
         raise ValueError("Sumo Logic Access Key not provided. Use --sumo-access-key or set SUMO_ACCESS_KEY environment variable.")
-    
-    db = OptimalChunksDB(args.db_path)
-    # Initialize the semaphore for concurrent API *jobs* at the top-level hourly chunk
-    api_job_semaphore = threading.Semaphore(args.max_concurrent_api_calls)
+
+    # The main exporter instance to be shared across threads. requests.Session is thread-safe.
     exporter = SumoExporter(
-        access_id=sumo_access_id, 
-        access_key=sumo_access_key, 
-        endpoint=sumo_api_endpoint, 
+        access_id=sumo_access_id,
+        access_key=sumo_access_key,
+        endpoint=sumo_api_endpoint,
         dry_run=args.dry_run,
         api_retry_initial_delay=args.api_retry_initial_delay_seconds,
         api_retry_max_delay=args.api_retry_max_delay_seconds,
         api_max_retries=args.api_max_retries,
         api_retry_backoff_factor=args.api_retry_backoff_factor
-    ) 
+    )
     query_hash = get_query_hash(args.sumo_query)
     compressor = zstandard.ZstdCompressor(level=3)
 
     split_intervals_parsed = []
     try:
         raw_intervals = [int(x.strip()) for x in args.split_intervals.split(',')]
-        # Ensure 1 is always available as a minimum interval and sort descending for shrinking
         split_intervals_parsed = sorted(list(set([x for x in raw_intervals if x >= 1] + [1])), reverse=True)
         if not split_intervals_parsed:
             raise ValueError("No valid split intervals provided after parsing.")
@@ -792,23 +756,19 @@ def run_export(args):
 
     log.info(f"Using split intervals: {split_intervals_parsed}")
 
-
-    total_tasks = 0
-    exported_messages_total = 0
-    split_tasks_total = 0
-    skipped_tasks_total = 0
-    task_counter = 0
+    tasks_to_queue = [] # List to hold arguments for each hourly task
 
     target_years = args.years
     target_months = [m.lower() for m in args.months] if args.months else list(calendar.month_abbr)[1:]
     target_days = args.days
     target_hours = args.hours
 
+    # Pre-calculate and queue all top-level hourly tasks
     for year in target_years:
         for month_num, month_abbr in enumerate(calendar.month_abbr):
             if month_num == 0 or month_abbr.lower() not in target_months:
                 continue
-            
+
             if target_days:
                 days_in_month = [d for d in target_days if 1 <= d <= calendar.monthrange(year, month_num)[1]]
             else:
@@ -817,111 +777,107 @@ def run_export(args):
             for day in days_in_month:
                 hours_to_process = target_hours if target_hours else range(24)
                 for hour in hours_to_process:
-                    total_tasks += 1
-
-    log.info(f"Prepared {total_tasks} tasks for data export.")
-
-    for year in target_years:
-        for month_num, month_abbr in enumerate(calendar.month_abbr):
-            if month_num == 0 or month_abbr.lower() not in target_months:
-                continue
-
-            days_in_month = []
-            if target_days:
-                days_in_month = [d for d in target_days if 1 <= d <= calendar.monthrange(year, month_num)[1]]
-            else:
-                days_in_month = range(1, calendar.monthrange(year, month_num)[1] + 1)
-
-            for day in days_in_month:
-                hours_to_process = target_hours if target_hours else range(24)
-                for hour in hours_to_process:
-                    task_counter += 1
                     current_hour_start_dt = datetime(year, month_num, day, hour, 0, 0, tzinfo=timezone.utc)
                     current_hour_end_dt = datetime(year, month_num, day, hour, 59, 59, tzinfo=timezone.utc)
 
-                    log.info(f"Processing Task {task_counter}/{total_tasks} for {current_hour_start_dt.isoformat()}")
+                    # We need a DB connection for each task, as sqlite3 connections are not thread-safe.
+                    # Or, as we do here, create a new connection for each task.
+                    # We pass the db_path to the task function, which will create its own connection.
+                    db_for_optimal_chunk_discovery = OptimalChunksDB(args.db_path) # Temp DB for initial discovery
+                    current_optimal_minutes_for_this_hour = db_for_optimal_chunk_discovery.get_optimal_chunk_minutes(query_hash, current_hour_start_dt)
+                    db_for_optimal_chunk_discovery.close() # Close temp DB
 
-                    current_optimal_minutes_for_this_hour = db.get_optimal_chunk_minutes(query_hash, current_hour_start_dt)
                     if current_optimal_minutes_for_this_hour is None:
                         if args.discover_optimal_chunk_sizes:
                             max_search_window_minutes = min(args.initial_optimal_chunk_search_minutes, 60)
-                            # Acquire semaphore for optimal chunk size discovery
-                            with api_job_semaphore:
-                                current_optimal_minutes_for_this_hour = find_optimal_chunk_size(
-                                    exporter, args.sumo_query, current_hour_start_dt,
-                                    max_search_window_minutes, args.max_messages_per_file,
-                                    args.job_poll_initial_delay_seconds, 
-                                    dry_run=args.dry_run
-                                )
-                            db.set_optimal_chunk_minutes(query_hash, current_hour_start_dt, current_optimal_minutes_for_this_hour)
+                            # Discovery of optimal chunk sizes is also an API call, so it should be handled
+                            # within the thread pool if it's going to happen for many hours.
+                            # For simplicity and to avoid nested ThreadPoolExecutors/deadlocks,
+                            # we'll do this discovery sequentially *before* queuing for main export.
+                            # If `discover_optimal_chunk_sizes` is True and no optimal chunk found,
+                            # this part still runs sequentially.
+                            current_optimal_minutes_for_this_hour = find_optimal_chunk_size(
+                                exporter, args.sumo_query, current_hour_start_dt,
+                                max_search_window_minutes, args.max_messages_per_file,
+                                args.job_poll_initial_delay_seconds,
+                                dry_run=args.dry_run
+                            )
+                            # Re-open DB to save the discovered value (or pass db_path to find_optimal_chunk_size to save internally)
+                            db_to_save_optimal = OptimalChunksDB(args.db_path)
+                            db_to_save_optimal.set_optimal_chunk_minutes(query_hash, current_hour_start_dt, current_optimal_minutes_for_this_hour)
+                            db_to_save_optimal.close()
                         else:
-                            # current_optimal_minutes_for_this_hour = DEFAULT_CHUNK_MINUTES_IF_NOT_FOUND
-                            current_optimal_minutes_for_this_hour = args.default_chunk_minutes_if_not_found 
+                            current_optimal_minutes_for_this_hour = DEFAULT_CHUNK_MINUTES_IF_NOT_FOUND
                             log.info(f"No optimal chunk size found for {current_hour_start_dt.isoformat()}. Using default: {current_optimal_minutes_for_this_hour} minutes.")
 
                     minutes_to_process_in_this_pass = current_optimal_minutes_for_this_hour
-                    num_sub_chunks_in_hour = math.ceil(60 / minutes_to_process_in_this_pass) # Use ceil for exact number
+                    num_sub_chunks_in_hour = math.ceil(60 / minutes_to_process_in_this_pass)
                     num_sub_chunks_in_hour = int(max(1, num_sub_chunks_in_hour))
 
-                    messages_for_this_hour_total = 0
-                    hour_was_split = False
-                    hour_was_skipped = False
-                    
-                    # Acquire semaphore here for the entire hourly processing, including its splits
-                    with api_job_semaphore: 
-                        for i in range(num_sub_chunks_in_hour):
-                            chunk_start_time = current_hour_start_dt + i * timedelta(minutes=minutes_to_process_in_this_pass)
-                            if chunk_start_time > current_hour_end_dt:
-                                break
-                            chunk_end_time = min(chunk_start_time + timedelta(minutes=minutes_to_process_in_this_pass) - timedelta(seconds=1), current_hour_end_dt)
+                    # Each of these sub-chunks will be a task for the ThreadPoolExecutor
+                    for i in range(num_sub_chunks_in_hour):
+                        chunk_start_time = current_hour_start_dt + i * timedelta(minutes=minutes_to_process_in_this_pass)
+                        if chunk_start_time > current_hour_end_dt:
+                            break
+                        chunk_end_time = min(chunk_start_time + timedelta(minutes=minutes_to_process_in_this_pass) - timedelta(seconds=1), current_hour_end_dt)
 
-                            chunk_duration_minutes = int((chunk_end_time - chunk_start_time + timedelta(seconds=1)).total_seconds() / 60)
-                            
-                            # The marker granularity for sub-jobs should align with how time_suffix is generated
-                            # If the chunk duration is < 60 minutes, it's typically a minute-level granularity for the marker.
-                            # If it's 60 minutes, it's hour.
-                            if chunk_duration_minutes < 60:
-                                marker_granularity = "minute"
-                            else:
-                                marker_granularity = "hour"
-                            
-                            job_marker_suffix = generate_time_suffix(chunk_start_time, marker_granularity)
+                        chunk_duration_minutes = int((chunk_end_time - chunk_start_time + timedelta(seconds=1)).total_seconds() / 60)
 
+                        if chunk_duration_minutes < 60:
+                            marker_granularity = "minute"
+                        else:
+                            marker_granularity = "hour"
 
-                            messages_count, was_split_this_subchunk, was_skipped_this_subchunk = process_query_chunk(
-                                exporter, args.sumo_query, chunk_start_time, chunk_end_time,
-                                job_marker_suffix, args.max_messages_per_file, args.messages_per_api_request,
-                                args.job_poll_initial_delay_seconds,
-                                args.base_output_directory, args.file_prefix, args.output_granularity,
-                                args.overwrite_archive_file_if_exists, args.if_zero_messages_skip_file_write,
-                                args.adaptive_shrink_consecutive_count, args.adaptive_grow_trigger_message_percent,
-                                args.adaptive_grow_consecutive_count, compressor,
-                                db, query_hash, current_optimal_minutes_for_this_hour, # Pass parent optimal_minutes_for_hour
-                                minutes_to_process_in_this_pass,
-                                split_intervals_parsed,
-                                0 # Top level call for this specific sub-hour chunk (depth 0 for adaptive logic application)
-                            )
+                        job_marker_suffix = generate_time_suffix(chunk_start_time, marker_granularity)
 
-                            messages_for_this_hour_total += messages_count
-                            if was_split_this_subchunk:
-                                hour_was_split = True
-                            if was_skipped_this_subchunk:
-                                hour_was_skipped = True
+                        # Prepare arguments for the task function
+                        task_args = (
+                            exporter, args.sumo_query, chunk_start_time, chunk_end_time,
+                            job_marker_suffix, args.max_messages_per_file, args.messages_per_api_request,
+                            args.job_poll_initial_delay_seconds,
+                            args.base_output_directory, args.file_prefix, args.output_granularity,
+                            args.overwrite_archive_file_if_exists, args.if_zero_messages_skip_file_write,
+                            args.adaptive_shrink_consecutive_count, args.adaptive_grow_trigger_message_percent,
+                            args.adaptive_grow_consecutive_count, compressor,
+                            args.db_path, query_hash, current_optimal_minutes_for_this_hour,
+                            minutes_to_process_in_this_pass,
+                            split_intervals_parsed,
+                            0 # Initial depth for top-level tasks
+                        )
+                        tasks_to_queue.append(task_args)
 
-                    exported_messages_total += messages_for_this_hour_total
-                    if hour_was_split:
+    log.info(f"Prepared {len(tasks_to_queue)} initial tasks for data export.")
+
+    exported_messages_total = 0
+    split_tasks_total = 0
+    skipped_tasks_total = 0
+
+    if tasks_to_queue:
+        with ThreadPoolExecutor(max_workers=args.max_concurrent_api_calls) as executor:
+            futures = {executor.submit(process_query_chunk_recursive, *task_args): task_args for task_args in tasks_to_queue}
+
+            for i, future in enumerate(as_completed(futures), 1):
+                original_task_args = futures[future]
+                chunk_start_time = original_task_args[2] # Extract chunk_start_time for logging
+
+                try:
+                    messages_count, was_split, was_skipped = future.result()
+                    exported_messages_total += messages_count
+                    if was_split:
                         split_tasks_total += 1
-                    if hour_was_skipped:
+                    if was_skipped:
                         skipped_tasks_total += 1
+                    log.info(f"Task {i}/{len(tasks_to_queue)} for {chunk_start_time.isoformat()} completed. Messages: {messages_count}. Skipped: {was_skipped}. Split: {was_split}")
+                except Exception as e:
+                    log.error(f"Task {i}/{len(tasks_to_queue)} for {chunk_start_time.isoformat()} failed: {e}")
+    else:
+        log.info("No tasks to execute for data export based on the provided parameters.")
 
-                    log.info(f"Task {task_counter}/{total_tasks} completed. Messages: {messages_for_this_hour_total}. Skipped: {hour_was_skipped}. Split: {hour_was_split}")
-
-    db.close()
     log.info("--- Data Export Summary ---")
-    log.info(f"Total tasks prepared: {total_tasks}")
+    log.info(f"Total tasks prepared: {len(tasks_to_queue)}")
     log.info(f"Total messages exported: {exported_messages_total}")
     log.info(f"Total tasks that required splitting: {split_tasks_total}")
-    log.info(f"Total tasks skipped (0 messages): {skipped_tasks_total}")
+    log.info(f"Total tasks skipped (0 messages or file exists): {skipped_tasks_total}")
     log.info("🚀 Sumo Logic data export script finished.")
 
 
@@ -981,13 +937,12 @@ def main():
                         help="Simulate the process without making actual API calls or writing files.")
 
     parser.add_argument("--max-concurrent-api-calls", type=int, default=DEFAULT_MAX_CONCURRENT_API_CALLS,
-                        help=f"Maximum number of concurrent Sumo Logic API calls. Default: {DEFAULT_MAX_CONCURRENT_API_CALLS}")
+                        help=f"Maximum number of concurrent Sumo Logic API calls (workers in thread pool). Default: {DEFAULT_MAX_CONCURRENT_API_CALLS}")
     parser.add_argument("--db-path", type=str, default=DEFAULT_DB_PATH,
                         help=f"Path to the SQLite database file for storing optimal chunk sizes. Default: {DEFAULT_DB_PATH}")
     parser.add_argument("--log-file", type=str,
                         help="Path to a file where logs will be written in addition to console output.")
-    
-    # New arguments for API backoff
+
     parser.add_argument("--api-retry-initial-delay-seconds", type=int, default=DEFAULT_API_RETRY_INITIAL_DELAY_SECONDS,
                         help=f"Initial delay for API call retries in seconds. Default: {DEFAULT_API_RETRY_INITIAL_DELAY_SECONDS}")
     parser.add_argument("--api-retry-max-delay-seconds", type=int, default=DEFAULT_API_RETRY_MAX_DELAY_SECONDS,
@@ -999,21 +954,24 @@ def main():
 
     args = parser.parse_args()
 
-    # Configure logging: clear existing handlers, then add new ones based on args
-    for handler in log.handlers[:]: 
+    for handler in log.handlers[:]:
         log.removeHandler(handler)
-    log.propagate = False 
+    log.propagate = False
 
-    # Always add a console handler
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
     log.addHandler(console_handler)
 
-    # Add file handler if specified
     if args.log_file:
         file_handler = logging.FileHandler(args.log_file)
         file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         log.addHandler(file_handler)
+
+    # Add file_prefix to base dir for root stroage directory uniqueness
+    if args.base_output_directory:
+        args.base_output_directory = f"{args.base_output_directory}/{args.file_prefix}"
+        print(args.base_output_directory)
+        time.sleep(10)
 
     if args.months:
         args.months = [m.lower() for m in args.months]
@@ -1023,9 +981,8 @@ def main():
 
     log.info("🚀 Starting Sumo Logic data export script...")
     log.info(f"🗃️ Optimal chunks DB will be used at: {args.db_path}")
-    log.info(f"⚡ Max concurrent API calls: {args.max_concurrent_api_calls}")
+    log.info(f"⚡ Max concurrent API calls (ThreadPoolExecutor workers): {args.max_concurrent_api_calls}")
     log.info(f"♻️ API Retry Policy: Initial Delay={args.api_retry_initial_delay_seconds}s, Max Delay={args.api_retry_max_delay_seconds}s, Max Retries={args.api_max_retries}, Backoff Factor={args.api_retry_backoff_factor}")
-
 
     run_export(args)
 
