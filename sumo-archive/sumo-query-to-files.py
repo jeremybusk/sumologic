@@ -855,7 +855,8 @@ def run_export(args):
                                 )
                             db.set_optimal_chunk_minutes(query_hash, current_hour_start_dt, current_optimal_minutes_for_this_hour)
                         else:
-                            current_optimal_minutes_for_this_hour = DEFAULT_CHUNK_MINUTES_IF_NOT_FOUND
+                            # current_optimal_minutes_for_this_hour = DEFAULT_CHUNK_MINUTES_IF_NOT_FOUND
+                            current_optimal_minutes_for_this_hour = args.default_chunk_minutes_if_not_found 
                             log.info(f"No optimal chunk size found for {current_hour_start_dt.isoformat()}. Using default: {current_optimal_minutes_for_this_hour} minutes.")
 
                     minutes_to_process_in_this_pass = current_optimal_minutes_for_this_hour
