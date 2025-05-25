@@ -29,8 +29,9 @@ DEFAULT_CHUNK_MINUTES_IF_NOT_FOUND = 60
 DEFAULT_ADAPTIVE_SHRINK_CONSECUTIVE_COUNT = 3
 DEFAULT_ADAPTIVE_GROW_TRIGGER_MESSAGE_PERCENT = 0.5
 DEFAULT_ADAPTIVE_GROW_CONSECUTIVE_COUNT = 5
-DEFAULT_SPLIT_INTERVALS = "60,30,15,5,1"
-DEFAULT_DB_PATH = "trun.db"
+# DEFAULT_SPLIT_INTERVALS = "60,30,15,5,1"
+DEFAULT_SPLIT_INTERVALS = "30,15,5,1"
+DEFAULT_DB_PATH = "sumo-query.db"
 DEFAULT_MAX_CONCURRENT_API_CALLS = 5
 
 # --- New Backoff Constants ---
@@ -40,8 +41,9 @@ DEFAULT_API_MAX_RETRIES = 10 # Total attempts including the first one
 DEFAULT_API_RETRY_BACKOFF_FACTOR = 2 # Exponential backoff (delay * factor)
 
 # --- New Compression Constants ---
-DEFAULT_COMPRESSION_FORMAT: Literal['zstd', 'gzip', 'lz4', 'none'] = 'zstd' # Default to zstd
+DEFAULT_COMPRESSION_FORMAT: Literal['zstd', 'gzip', 'lz4', 'none'] = 'gzip' # Default to gzip 
 DEFAULT_ZSTD_COMPRESSION_LEVEL = 3
+# DEFAULT_GZIP_COMPRESSION_LEVEL = 3 # 1-9, 9 is best
 DEFAULT_GZIP_COMPRESSION_LEVEL = 5 # 1-9, 9 is best
 DEFAULT_LZ4_COMPRESSION_LEVEL = 0 # 0-16, 0 is default/fastest, 16 is best
 
@@ -1007,10 +1009,6 @@ def main():
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
     log.addHandler(console_handler)
-
-    if args.base_output_directory:
-        args.base_output_directory = f"{args.base_output_directory}/{args.file_prefix}"
-        print(args.base_output_directory)
 
     if args.log_file:
         file_handler = logging.FileHandler(args.log_file)
