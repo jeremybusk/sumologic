@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+i#!/usr/bin/env python3
 import os
 import json
 import time
@@ -19,18 +19,11 @@ SUMO_API_URL = f"{PROTOCOL}://{HOST}/api/v1/search/jobs"
 API_ACCESS_ID = os.getenv("SUMO_ACCESS_ID")
 API_ACCESS_KEY = os.getenv("SUMO_ACCESS_KEY")
 SEARCH_JOB_RESULTS_LIMIT = 10000  # Maximum messages per request
-# MAX_CONCURRENT_JOBS = 18  # Limit for concurrent active jobs
 MAX_CONCURRENT_JOBS = 18  # Limit for concurrent active jobs
-# API_RATE_LIMIT_DELAY = MAX_CONCURRENT_JOBS // 2   # Delay in seconds between API calls to avoid rate limiting
-API_RATE_LIMIT_DELAY = 9  # Delay in seconds between API calls to avoid rate limiting
-MESSAGE_LIMIT = 200000  # Maximum messages per query
-# MESSAGE_LIMIT = 100000  # Maximum messages per query 100000 in docs 200000 you can miss messages
+API_RATE_LIMIT_DELAY = 9  # Delay in seconds between API calls to avoid rate limiting as 4 calls per second is max
+MESSAGE_LIMIT = 200000  # Maximum messages per query API docs specify 100K but it seems to be 200K https://help.sumologic.com/docs/api/search-job/
 MAX_MINUTES_PER_QUERY = None  # Will be dynamically calculated or retrieved from the database
-# DB_FILE = "sumologic_default.query_limits.db"  # SQLite database file
-# DB_FILE = "sumo-query100k.db"  # SQLite database file
-# DB_FILE = "sumo-queryM10-100k.db"  # SQLite database file
 DB_FILE = "sumo-query.db"  # SQLite database file
-OVERWRITE_EMPTY_FILES = False
 
 # Semaphore to limit concurrent jobs
 job_semaphore = Semaphore(MAX_CONCURRENT_JOBS)
@@ -40,9 +33,10 @@ def ensure_directory_exists(path):
     os.makedirs(path, exist_ok=True)
 
 # Configure logging
-def configure_logging(logfile, verbose):
+def configure_logging(logfile, log_level):
+    loglevel = getattr(logging, log_level.upper())
     logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
+        level=loglevel,
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[
@@ -180,15 +174,12 @@ def all_minute_files_exist(start_time, end_time, output_dir):
         file_name = f"{minute:02}.json.gz"
         file_path = os.path.join(directory, file_name)
 
-        # Check if the file exists and is non-empty
+        # Check if the file exists and if empty log in debug.
         if not os.path.exists(file_path):
             logging.debug(f"File does not exist: {file_path}")
             return False
         if os.path.getsize(file_path) == 0:
             logging.debug(f"File is empty: {file_path}")
-            if OVERWRITE_EMPTY_FILES:
-                logging.debug(f"Overwriting empty file: {file_path}")
-                return False
 
         # Move to the next minute
         current_time += timedelta(minutes=1)
@@ -326,45 +317,40 @@ def process_time_range(query, start_time, end_time, output_dir):
     Process a time range dynamically. If the number of messages exceeds MESSAGE_LIMIT,
     split the query into smaller chunks and reprocess.
     """
-    global MAX_MINUTES_PER_QUERY
-
-    # Check if all minute files exist
-    if all_minute_files_exist(start_time, end_time, output_dir):
-        logging.info(f"⏩ Skipping query for {start_time} to {end_time} (all minute files exist).")
-        return
-
     duration = (end_time - start_time).total_seconds() / 60
 
-    # If the duration exceeds MAX_MINUTES_PER_QUERY, split the range
+    # Skip if all minute files exist
+    if all_minute_files_exist(start_time, end_time, output_dir):
+        logging.info(f"⏭️ Skipping query for {start_time} to {end_time} (all minute files exist).")
+        return
+
+    # Split if range is too long
     if duration > MAX_MINUTES_PER_QUERY:
         mid_time = start_time + timedelta(minutes=MAX_MINUTES_PER_QUERY)
         process_time_range(query, start_time, mid_time, output_dir)
         process_time_range(query, mid_time, end_time, output_dir)
         return
 
-    # Create the search job
+    # Try to fetch messages
     try:
         job_id = create_search_job(query, start_time, end_time)
         wait_for_job_completion(job_id)
         messages = fetch_all_messages(job_id)
 
-        # If the number of messages exceeds MESSAGE_LIMIT, split the range into smaller chunks
+        # If too many messages, split again using MAX_MINUTES_PER_QUERY
         if len(messages) > MESSAGE_LIMIT:
-            logging.warning(
-                f"Query for {start_time} to {end_time} returned {len(messages)} messages, "
-                f"exceeding MESSAGE_LIMIT ({MESSAGE_LIMIT}). Splitting into smaller chunks."
-            )
-            mid_time = start_time + timedelta(minutes=(duration // 2))
+            mid_time = start_time + timedelta(minutes=min(MAX_MINUTES_PER_QUERY, int(duration / 2)))
+            if mid_time <= start_time or mid_time >= end_time:
+                logging.warning(f"⚠️ Cannot split further: {start_time} → {end_time}")
+                return
             process_time_range(query, start_time, mid_time, output_dir)
             process_time_range(query, mid_time, end_time, output_dir)
         else:
-            # Save the messages if within the limit
             save_messages_by_minute(messages, output_dir)
             logging.info(f"✅ Successfully processed range: {start_time} to {end_time}")
 
     except Exception as e:
         logging.error(f"❌ Error processing range {start_time} to {end_time}: {e}")
-
 
 # Main function
 def main():
@@ -377,11 +363,11 @@ def main():
     parser.add_argument("--output-dir", required=True, help="Directory to save the output files.")
     parser.add_argument("--logfile", default="sumo-query.log", help="Path to the log file (default: sumo-query.log).")
     parser.add_argument("--only-missing-minutes", action="store_true", help="Process only missing minute files.")
-    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging for debugging.")
+    parser.add_argument('--log-level', default='WARNING', help='Set the logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)')
     args = parser.parse_args()
 
     # Configure logging
-    configure_logging(args.logfile, args.verbose)
+    configure_logging(args.logfile, args.log_level)
 
     # Process only missing minutes if the argument is specified
     if args.only_missing_minutes:
