@@ -28,12 +28,12 @@ MESSAGE_LIMIT = 199999
 DEFAULT_DISCOVER_TIME = datetime(2024, 3, 1, 15, tzinfo=timezone.utc)
 MIN_SPLIT_MINUTES = 1  # don't split ranges shorter than 1 minute
 
+
 # === Globals ===
 conn = None
 
+
 # === Logging ===
-
-
 def configure_logging(logfile, log_level):
     loglevel = getattr(logging, log_level.upper(), logging.INFO)
     logging.basicConfig(
@@ -44,9 +44,8 @@ def configure_logging(logfile, log_level):
     )
     logging.info("Logging initialized.")
 
+
 # === DB Functions ===
-
-
 def init_db(db_path):
     global conn
     conn = sqlite3.connect(db_path)
@@ -100,9 +99,8 @@ def log_query_split(query, original_start, original_end, sub_start, sub_end):
                sub_start.isoformat(), sub_end.isoformat()))
     conn.commit()
 
+
 # === Core Functions ===
-
-
 def ensure_directory_exists(path):
     os.makedirs(path, exist_ok=True)
 
