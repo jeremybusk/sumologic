@@ -10,9 +10,29 @@ The upload "sumo-archive" container must be created before running commands.
 
 Zstandard was created for performance gains. Uses zst file extention. It is prefered over gzip because of faster compression & decompression.
 
-LZ4 is another option. GZIP is most widely supported but less performant.
+LZ4 is another option. GZIP is most widely supported but less performant. I had some issues with crash with many streams using zstandard/zstd so I'll be using gzip, that while a lot slower gives you really good compression and is probably tested a lot more. We can always use zst in the the future if needed.
 
-## CLI examples
+## Getting Sumo Logic data to a files
+
+### Set env vars
+.env
+```
+```
+
+### Create nohup bash script using your date range and query
+```
+CMD='time python3 x.py --year-range 2023 2024 --month-range 1 12 --day-range 1 31 --query "_index=networking" --output-dir _index_networking --log-level DEBUG --max-concurrent-jobs 18 --max-minutes 9 -sqlite-db sumo-query.db'
+nohup bash -c "$CMD" >> nohup.log 2>&1 &
+```
+
+### Output
+```
+Saved 9833 messages to _index_networking/2023/06/02/16/15.json.gz
+```
+
+
+
+## CLI examples for blob instances
 
 ### Run sumo query and export files to blob.
 
@@ -59,7 +79,7 @@ my-prefix_part1.json.zst
 
 ```
 
-# Security
+## Security
 
 You can use sha1 hashes for files in read-only or signed file to verify they haven't changed.
 
@@ -76,3 +96,5 @@ Spin Azure Container Instance up only when needed.
 Make sure you have enough RAM to support in-memory options for max file sizes.
 
 Azure Function App is another option where you only pay when used.
+
+Using Go over Python would probably save more CPU cycles
