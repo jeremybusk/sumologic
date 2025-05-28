@@ -21,13 +21,18 @@ LZ4 is another option. GZIP is most widely supported but less performant. I had 
 
 ### Create nohup bash script using your date range and query
 ```
-CMD='time python3 x.py --year-range 2023 2024 --month-range 1 12 --day-range 1 31 --query "_index=networking" --output-dir _index_networking --log-level DEBUG --max-concurrent-jobs 18 --max-minutes 9 -sqlite-db sumo-query.db'
+CMD='time python3 sumo-query-to-files.py --year-range 2023 2024 --month-range 1 12 --day-range 1 31 --query "_index=networking" --output-dir _index_networking --log-level DEBUG --max-concurrent-jobs 18 --max-minutes 9 -sqlite-db sumo-query.db'
 nohup bash -c "$CMD" >> nohup.log 2>&1 &
 ```
 
 ### Output
 ```
 Saved 9833 messages to _index_networking/2023/06/02/16/15.json.gz
+```
+
+## Query data in files
+```
+python3 files-query --archive-dir _index_sumologic_default/ --start 2023-12-31T14:00 --end 2024-12-31T15:00 --match _raw="Searching for files in" --match _sourcecategory=Web
 ```
 
 
