@@ -92,8 +92,8 @@ def log_query_split(query, original_start, original_end, sub_start, sub_end):
     if conn is None:
         return
     c = conn.cursor()
-    c.execute("""INSERT INTO query_splits 
-                 (query, original_start, original_end, sub_start, sub_end) 
+    c.execute("""INSERT INTO query_splits
+                 (query, original_start, original_end, sub_start, sub_end)
                  VALUES (?, ?, ?, ?, ?)""",
               (query, original_start.isoformat(), original_end.isoformat(),
                sub_start.isoformat(), sub_end.isoformat()))
