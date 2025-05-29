@@ -229,9 +229,13 @@ def process_time_range(query, start, end, output_dir, max_minutes, dry_run, spli
             f"{'  '*depth}✅ Skipping {start}–{end}, all minute files exist.")
         return
 
+
     if duration > max_minutes and duration > MIN_SPLIT_MINUTES:
-        step_minutes = duration / split_factor
-        for i in range(split_factor):
+        # Compute how many splits we want: min between split_factor and ceil(duration / max_minutes)
+        desired_chunks = min(split_factor, int((duration + max_minutes - 1) // max_minutes))
+        step_minutes = duration / desired_chunks
+
+        for i in range(desired_chunks):
             s = start + timedelta(minutes=round(i * step_minutes))
             e = start + timedelta(minutes=round((i + 1) * step_minutes))
             if e > end:
@@ -242,6 +246,7 @@ def process_time_range(query, start, end, output_dir, max_minutes, dry_run, spli
             process_time_range(query, s, e, output_dir, max_minutes,
                                dry_run, split_factor, failed, depth + 1)
         return
+
 
     if dry_run:
         logging.info(f"{'  '*depth}[DRY-RUN] Would query {start} to {end}")
@@ -298,12 +303,10 @@ def main():
     if args.sqlite_db:
         init_db(args.sqlite_db)
 
-    if not args.max_minutes:
-        discover_max_minutes(args.query)
-        max_minutes = discover_max_minutes(args.query)
-    else:
-        max_minutes = args.max_minutes
+    max_minutes = args.max_minutes or discover_max_minutes(args.query)
     logging.info(f"💡 Using {max_minutes} minutes per query")
+    print("Proceeding in 5")
+    time.sleep(5)
 
     year_start, year_end = args.year_range
     month_start, month_end = args.month_range
@@ -337,3 +340,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
