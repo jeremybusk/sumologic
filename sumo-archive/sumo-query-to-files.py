@@ -30,7 +30,10 @@ MIN_SPLIT_MINUTES = 1  # don't split ranges shorter than 1 minute
 
 
 # === Globals ===
+from threading import Lock
+db_lock = Lock()
 conn = None
+
 
 
 # === Logging ===
@@ -48,57 +51,59 @@ def configure_logging(logfile, log_level):
 # === DB Functions ===
 def init_db(db_path):
     global conn
-    conn = sqlite3.connect(db_path)
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS message_counts (
-            query TEXT,
-            timestamp TEXT,
-            message_count INTEGER
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS query_splits (
-            query TEXT,
-            original_start TEXT,
-            original_end TEXT,
-            sub_start TEXT,
-            sub_end TEXT
-        )
-    """)
-    conn.commit()
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    with db_lock:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS message_counts (
+                query TEXT,
+                timestamp TEXT,
+                message_count INTEGER
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS query_splits (
+                query TEXT,
+                original_start TEXT,
+                original_end TEXT,
+                sub_start TEXT,
+                sub_end TEXT
+            )
+        """)
+        conn.commit()
 
 
 def save_message_counts(query, messages):
     if conn is None:
         return
-    c = conn.cursor()
     grouped = defaultdict(int)
     for message in messages:
         try:
             ts = int(message["map"]["_messagetime"]) // 1000
-            dt = datetime.fromtimestamp(
-                ts, tz=timezone.utc).replace(second=0, microsecond=0)
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc).replace(second=0, microsecond=0)
             grouped[dt.isoformat()] += 1
         except Exception as e:
             logging.warning(f"Failed to parse timestamp: {e}")
-    for minute, count in grouped.items():
-        c.execute("INSERT INTO message_counts (query, timestamp, message_count) VALUES (?, ?, ?)",
-                  (query, minute, count))
-    conn.commit()
+
+    with db_lock:
+        c = conn.cursor()
+        for minute, count in grouped.items():
+            c.execute("INSERT INTO message_counts (query, timestamp, message_count) VALUES (?, ?, ?)",
+                      (query, minute, count))
+        conn.commit()
 
 
 def log_query_split(query, original_start, original_end, sub_start, sub_end):
     if conn is None:
         return
-    c = conn.cursor()
-    c.execute("""INSERT INTO query_splits
-                 (query, original_start, original_end, sub_start, sub_end)
-                 VALUES (?, ?, ?, ?, ?)""",
-              (query, original_start.isoformat(), original_end.isoformat(),
-               sub_start.isoformat(), sub_end.isoformat()))
-    conn.commit()
-
+    with db_lock:
+        c = conn.cursor()
+        c.execute("""INSERT INTO query_splits
+                     (query, original_start, original_end, sub_start, sub_end)
+                     VALUES (?, ?, ?, ?, ?)""",
+                  (query, original_start.isoformat(), original_end.isoformat(),
+                   sub_start.isoformat(), sub_end.isoformat()))
+        conn.commit()
 
 # === Core Functions ===
 def ensure_directory_exists(path):
