@@ -1,6 +1,14 @@
 # SumoLogic API Limitations
 
+## Quick Summary
+
 https://help.sumologic.com/docs/api/search-job/
+
+'https://api.sumologic.com/api/v1/search/jobs/37589506F194FC80/records?offset=0&limit=1'
+
+limit	Int	Yes	The number of records starting at offset to return. The maximum value for limit is 10,000 records.
+
+Total messages per query says 100k in docs but appears to be 200k from actual API.
 
 ## Primary Limitations
 
