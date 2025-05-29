@@ -5,6 +5,8 @@ import gzip
 from collections import defaultdict
 from datetime import datetime
 import argparse
+import calendar
+
 
 def ensure_directory_exists(path):
     os.makedirs(path, exist_ok=True)
@@ -31,6 +33,10 @@ def generate_summary_report(input_dir, years, months, days):
                 continue
 
             for day in days:
+                # === Adjust for months different number of days ===
+                _, max_day = calendar.monthrange(year, month)
+                day = min(day, max_day)
+
                 day_dir = os.path.join(month_dir, f"{day:02}")
                 if not os.path.exists(day_dir):
                     missing["days"].append(f"{year}/{month:02}/{day:02}")
