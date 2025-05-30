@@ -234,8 +234,9 @@ def process_time_range(query, start, end, output_dir, max_minutes, dry_run, spli
         # Compute how many splits we want: min between split_factor and ceil(duration / max_minutes)
         desired_chunks = min(split_factor, int((duration + max_minutes - 1) // max_minutes))
         step_minutes = duration / desired_chunks
-
         for i in range(desired_chunks):
+        # step_minutes = duration / split_factor
+        # for i in range(split_factor):
             s = start + timedelta(minutes=round(i * step_minutes))
             e = start + timedelta(minutes=round((i + 1) * step_minutes))
             if e > end:
@@ -271,12 +272,68 @@ def process_time_range(query, start, end, output_dir, max_minutes, dry_run, spli
                 log_query_split(query, start, end, s, e)
                 process_time_range(
                     query, s, e, output_dir, max_minutes, dry_run, split_factor, failed, depth + 1)
+        # else:
+        #     save_messages_by_minute(messages, output_dir)
         else:
-            save_messages_by_minute(messages, output_dir)
+            if messages:
+                save_messages_by_minute(messages, output_dir)
+            else:
+                if write_files_with_zero_messages and (end - start) == timedelta(minutes=1):
+                    write_empty_file_if_needed(start, output_dir)
+
+
 
     except Exception as e:
         logging.error(f"{'  '*depth}❌ Error {start} → {end}: {e}")
         failed.append((start, end))
+
+
+# def query_first_minute_per_day(year, day, query):
+def query_first_minute_per_day(args):
+    summary = []
+    year_start, year_end = args.year_range
+    month_start, month_end = args.month_range
+    day_start, day_end = args.day_range if args.day_range else (1, 31)
+    for year in range(year_start, year_end + 1):
+        for month in range(month_start, month_end + 1):
+        # for month in range(1, 13):
+            # for day in range(1, 32):
+            _, max_days = calendar.monthrange(year, month)
+            for day in range(day_start, min(day_end, max_days) + 1):
+                # print(day)
+                # time.sleep(5)
+                # for day in range(1, 2):
+                try:
+                    start = datetime(year, month, day, 0, 0, 0, tzinfo=timezone.utc)
+                    end = start + timedelta(minutes=1)
+                except ValueError:
+                    continue  # Skip invalid dates
+                logging.info(f"🔍 Querying {start.isoformat()} to {end.isoformat()}")
+                try:
+                    job_id = create_search_job(args.query, start, end)
+                    wait_for_job_completion(job_id)
+                    messages = fetch_all_messages(job_id)
+                    count = len(messages)
+                    summary.append((start.date(), count))
+                    print(f"{start.date()}: {count} messages")
+                except Exception as e:
+                    print(f"{start.date()}: error - {e}")
+                    continue
+
+    return summary
+
+
+def write_empty_file_if_needed(start, output_dir):
+    path = Path(output_dir) / f"{start.year}/{start.month:02}/{start.day:02}/{start.hour:02}"
+    ensure_directory_exists(path)
+    file_path = path / f"{start.minute:02}.json.gz"
+    try:
+        with gzip.open(file_path, "wt") as f:
+            json.dump([], f)
+        logging.info(f"✅ Wrote empty file: {file_path}")
+    except Exception as e:
+        logging.error(f"Failed to write empty file {file_path}: {e}")
+
 
 
 # === Main ===
@@ -290,7 +347,9 @@ def main():
     parser.add_argument("--logfile", default="sumo-query.log")
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--query-first-minute-per-day", action="store_true")
     parser.add_argument("--split-factor", type=int, default=10)
+    parser.add_argument("--write-files-with-zero-messages", action="store_true")
     parser.add_argument("--max-concurrent-jobs", type=int,
                         default=DEFAULT_MAX_CONCURRENT_JOBS)
     parser.add_argument("--max-minutes", type=int)
@@ -299,6 +358,16 @@ def main():
     args = parser.parse_args()
 
     configure_logging(args.logfile, args.log_level)
+
+    global write_files_with_zero_messages
+    write_files_with_zero_messages = args.write_files_with_zero_messages
+
+    if args.query_first_minute_per_day:
+        year_start, year_end = args.year_range
+        for year in range(year_start, year_end + 1):
+            query_first_minute_per_day(args)
+        return
+
 
     if args.sqlite_db:
         init_db(args.sqlite_db)
@@ -311,6 +380,7 @@ def main():
     year_start, year_end = args.year_range
     month_start, month_end = args.month_range
     day_start, day_end = args.day_range if args.day_range else (1, 31)
+
 
     failed = []
     with ThreadPoolExecutor(max_workers=args.max_concurrent_jobs) as executor:
@@ -340,4 +410,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
