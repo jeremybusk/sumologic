@@ -14,6 +14,7 @@ from pathlib import Path
 from collections import defaultdict
 import argparse
 import sys
+import math
 
 # === Constants ===
 PROTOCOL = "https"
@@ -231,12 +232,16 @@ def process_time_range(query, start, end, output_dir, max_minutes, dry_run, spli
 
 
     if duration > max_minutes and duration > MIN_SPLIT_MINUTES:
-        # Compute how many splits we want: min between split_factor and ceil(duration / max_minutes)
-        desired_chunks = min(split_factor, int((duration + max_minutes - 1) // max_minutes))
+        min_chunks_needed = math.ceil(duration / max_minutes)
+        if split_factor == 1:
+            desired_chunks = min_chunks_needed
+        else:
+            desired_chunks = min(split_factor, min_chunks_needed)
+        if desired_chunks == 1 and duration > max_minutes:
+            desired_chunks = 2 # Force at least 2 chunks to make progress
+
         step_minutes = duration / desired_chunks
         for i in range(desired_chunks):
-        # step_minutes = duration / split_factor
-        # for i in range(split_factor):
             s = start + timedelta(minutes=round(i * step_minutes))
             e = start + timedelta(minutes=round((i + 1) * step_minutes))
             if e > end:
@@ -247,6 +252,8 @@ def process_time_range(query, start, end, output_dir, max_minutes, dry_run, spli
             process_time_range(query, s, e, output_dir, max_minutes,
                                dry_run, split_factor, failed, depth + 1)
         return
+    else:
+        logging.info(f"{'  '*depth}✅ Processing chunk: {start} -> {end} ({duration:.1f} min)")
 
 
     if dry_run:
@@ -409,4 +416,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main(
