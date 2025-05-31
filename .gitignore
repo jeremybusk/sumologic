@@ -1,1 +1,4 @@
 sumo-archive/go/.env
+.env.secrets*
+**/.env
+*.env
