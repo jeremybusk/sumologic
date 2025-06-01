@@ -560,6 +560,7 @@ func writeEmptyFileIfNeeded(start time.Time, outputDir string) {
 
 var (
         semaphore          chan struct{}
+		resumeFrom         time.Time
         // apiRateLimitDelay  = 2 * time.Second // delay when hitting 429
 )
 
@@ -578,6 +579,11 @@ func processTimeRange(
         defer wg.Done()
         semaphore <- struct{}{}
         defer func() { <-semaphore }()
+
+        if end.Before(resumeFrom) {
+                logInfo("⏩ Skipping %s → %s (before resume-from)", start.Format(time.RFC3339), end.Format(time.RFC3339))
+                return
+        }
 
         duration := end.Sub(start).Minutes()
         indent := "  "
@@ -755,6 +761,7 @@ type arguments struct {
 	MaxConcurrentJobs      int
 	MaxMinutes             int
 	SQLiteDB               string
+	ResumeFrom string
 }
 
 func parseArgs() *arguments {
@@ -773,6 +780,7 @@ func parseArgs() *arguments {
 	pflag.IntVar(&args.MaxConcurrentJobs, "max-concurrent-jobs", defaultMaxConcurrentJobs, "Maximum number of concurrent Sumo Logic search jobs")
 	pflag.IntVar(&args.MaxMinutes, "max-minutes", 0, "Maximum minutes per query (defaults to discovered value)")
 	pflag.StringVar(&args.SQLiteDB, "sqlite-db", "", "Path to SQLite DB to store message counts and splits")
+	pflag.StringVar(&args.ResumeFrom, "resume-from", "", "RFC3339 UTC timestamp to resume processing from (e.g. 2024-06-01T00:00:00Z)")
 
 	pflag.Parse()
 	str := fmt.Sprint(args.YearRange)
@@ -790,6 +798,7 @@ func parseArgs() *arguments {
 
 	return args
 }
+
 
 
 func main() {
@@ -818,6 +827,17 @@ func main() {
         if args.MaxMinutes == 0 {
                 args.MaxMinutes = discoverMaxMinutes(args.Query)
                 logInfo("Discovered max-minutes: %d", args.MaxMinutes)
+        }
+
+        if args.ResumeFrom != "" {
+                parsed, err := time.Parse(time.RFC3339, args.ResumeFrom)
+                if err != nil {
+                        logFatal("Invalid --resume-from time format, must be RFC3339: %v", err)
+                }
+                resumeFrom = parsed
+                logInfo("🕒 Resuming from: %s", resumeFrom.Format(time.RFC3339))
+        } else {
+                resumeFrom = time.Time{} // zero means no limit
         }
 
         var wg sync.WaitGroup
