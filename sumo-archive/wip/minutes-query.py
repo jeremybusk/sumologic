@@ -59,6 +59,31 @@ def ensure_directory_exists(path: Path):
     path.mkdir(parents=True, exist_ok=True)
 
 
+def write_minute_atomically(msgs: list, out_path: Path):
+    """
+    Write messages to a temporary .json.gz file and fsync before renaming to the final path.
+    This prevents leaving a partially written .json.gz if interrupted.
+    """
+    tmp_path = out_path.with_suffix(".json.gz.tmp")
+    # Ensure parent directory exists
+    ensure_directory_exists(out_path.parent)
+
+    try:
+        with gzip.open(tmp_path, "wt", encoding="utf-8") as f:
+            json.dump(msgs, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, out_path)
+        logging.info(f"✅ Wrote {len(msgs)} messages to {out_path}")
+    except Exception:
+        # Cleanup any leftover temp file if something failed
+        try:
+            tmp_path.unlink()
+        except Exception:
+            pass
+        raise
+
+
 def create_search_job(query: str, start_time: datetime, end_time: datetime) -> str:
     """
     Submit a new Sumo Logic search job for the given time window.
@@ -146,7 +171,7 @@ def process_minute(dt: datetime, args, sem: Semaphore):
       3) Wait for it to complete.
       4) Fetch all messages.
       5) If count > message_limit, raise.
-      6) Otherwise, write them to <YYYY>/<MM>/<DD>/<HH>/<MM>.json.gz.
+      6) Otherwise, write them atomically.
     """
     out_path = get_minute_filepath(args.output_dir, dt)
     if out_path.exists():
@@ -170,12 +195,8 @@ def process_minute(dt: datetime, args, sem: Semaphore):
                 f"🚫 Minute {dt.strftime('%Y-%m-%dT%H:%M')} exceeds MESSAGE_LIMIT ({args.message_limit})."
             )
 
-        # Write to disk
-        out_dir = out_path.parent
-        ensure_directory_exists(out_dir)
-        with gzip.open(out_path, "wt", encoding="utf-8") as f:
-            json.dump(msgs, f)
-        logging.info(f"✅ Wrote {total_messages} messages to {out_path}")
+        # Atomically write to disk
+        write_minute_atomically(msgs, out_path)
 
     finally:
         sem.release()
@@ -225,14 +246,17 @@ def main():
     # Semaphore to throttle concurrent Sumo Logic jobs
     sem = Semaphore(args.max_concurrent_jobs)
 
-    # ThreadPoolExecutor with same number of workers as max_concurrent_jobs
-    with ThreadPoolExecutor(max_workers=args.max_concurrent_jobs) as executor:
-        future_to_minute = {}
+    # Create ThreadPoolExecutor outside of 'with' so we can shut it down on KeyboardInterrupt
+    executor = ThreadPoolExecutor(max_workers=args.max_concurrent_jobs)
+    future_to_minute = {}
+
+    try:
         for minute_dt in all_minutes:
             out_path = get_minute_filepath(args.output_dir, minute_dt)
             if out_path.exists():
                 logging.debug(f"⏭  Skipping {minute_dt.isoformat()} (file exists).")
                 continue
+
             future = executor.submit(process_minute, minute_dt, args, sem)
             future_to_minute[future] = minute_dt
 
@@ -244,9 +268,22 @@ def main():
             except Exception as e:
                 logging.error(f"❌ Error processing minute {minute_dt.strftime('%Y-%m-%dT%H:%M')}: {e}")
                 # Abort entire run on first failure
-                sys.exit(1)
+                raise
 
-    logging.info("✅ Done archiving all minutes.")
+    except KeyboardInterrupt:
+        logging.info("⚠️  Caught Ctrl-C, shutting down executor...")
+        executor.shutdown(wait=False)
+        sys.exit(1)
+
+    except Exception:
+        # Any other exception: shut down immediately
+        executor.shutdown(wait=False)
+        sys.exit(1)
+
+    else:
+        # No exceptions, allow all threads to finish cleanly
+        executor.shutdown(wait=True)
+        logging.info("✅ Done archiving all minutes.")
 
 
 if __name__ == "__main__":
