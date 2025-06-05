@@ -25,6 +25,17 @@ API_RATE_LIMIT_DELAY = 2           # seconds to sleep on 429
 API_ACCESS_ID = os.getenv("SUMO_ACCESS_ID")
 API_ACCESS_KEY = os.getenv("SUMO_ACCESS_KEY")
 
+
+def configure_logging(logfile, log_level):
+    loglevel = getattr(logging, log_level.upper(), logging.INFO)
+    logging.basicConfig(
+        level=loglevel,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[logging.FileHandler(logfile), logging.StreamHandler()]
+    )
+    logging.info("Logging initialized.")
+
 if not API_ACCESS_ID or not API_ACCESS_KEY:
     print("ERROR: Please set SUMO_ACCESS_ID and SUMO_ACCESS_KEY environment variables.", file=sys.stderr)
     sys.exit(1)
@@ -215,17 +226,19 @@ def main():
     parser.add_argument("--output-dir", required=True,
                         help="Base directory under which to write YYYY/MM/DD/HH/MM.json.gz")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG","INFO","WARNING","ERROR"])
+    parser.add_argument("--logfile", default="sumo-query.log")
     parser.add_argument("--message-limit", type=int, default=200000,
                         help="Max messages allowed per minute (default: 200000).")
     parser.add_argument("--max-concurrent-jobs", type=int, default=4,
                         help="Number of concurrent Sumo Logic jobs (default: 4).")
     args = parser.parse_args()
 
-    logging.basicConfig(
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        level=getattr(logging, args.log_level),
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
+    # logging.basicConfig(
+    #     format="%(asctime)s [%(levelname)s] %(message)s",
+    #     level=getattr(logging, args.log_level),
+    #     datefmt="%Y-%m-%d %H:%M:%S"
+    # )
+    configure_logging(args.logfile, args.log_level)
 
     # Floor start/end to whole minutes
     start_dt = parse_iso_minute(args.start_date)
