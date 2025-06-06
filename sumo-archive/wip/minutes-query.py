@@ -124,8 +124,7 @@ def create_search_job(query: str, start_time: datetime, end_time: datetime) -> s
 def wait_for_job_completion(job_id: str):
     """
     Poll the Sumo Logic job status until it is 'DONE GATHERING RESULTS'.
-    Retries on HTTP 429.
-    Raises if the job ends in CANCELLED or FAILED.
+    Retries on HTTP 429. Handles 404 when the job is canceled due to inactivity.
     """
     status_url = f"{SUMO_API_URL}/{job_id}"
     while True:
@@ -134,7 +133,10 @@ def wait_for_job_completion(job_id: str):
             logging.warning("Rate limit hit checking job status. Retrying...")
             time.sleep(API_RATE_LIMIT_DELAY)
             continue
+        if response.status_code == 404:
+            raise RuntimeError(f"Search job {job_id} not found (possibly expired or canceled).")
         response.raise_for_status()
+
         state = response.json().get("state")
         if state == "DONE GATHERING RESULTS":
             return
@@ -146,8 +148,7 @@ def wait_for_job_completion(job_id: str):
 def fetch_all_messages(job_id: str) -> list:
     """
     Fetch all messages for a completed search job in pages of up to SEARCH_JOB_RESULTS_LIMIT.
-    Retries on HTTP 429.
-    Returns the list of message dicts.
+    Retries on HTTP 429. Handles 404 if job is no longer available.
     """
     messages = []
     offset = 0
@@ -162,7 +163,10 @@ def fetch_all_messages(job_id: str) -> list:
             logging.warning("Rate limit hit fetching messages. Sleeping before retry...")
             time.sleep(API_RATE_LIMIT_DELAY)
             continue
+        if response.status_code == 404:
+            raise RuntimeError(f"Search job {job_id} not found while fetching messages (possibly expired).")
         response.raise_for_status()
+
         batch = response.json().get("messages", [])
         logging.debug(f"    → fetched batch of {len(batch)} messages (offset {offset}).")
         if not batch:
