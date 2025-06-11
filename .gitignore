@@ -2,3 +2,4 @@ sumo-archive/go/.env
 .env.secrets*
 **/.env
 *.env
+sumo-archive/go-sumo-archive-tool/sumo-archive-tool
