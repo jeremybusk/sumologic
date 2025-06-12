@@ -15,9 +15,7 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
-	// "github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/klauspost/compress/zstd"
-	"github.com/pierrec/lz4/v4"
 	"github.com/spf13/cobra"
 )
 
@@ -44,8 +42,6 @@ func getCompressionReader(file io.Reader, ext string) (io.ReadCloser, error) {
 		}
 		// zstd.NewReader returns a concrete type, so we wrap it to satisfy io.ReadCloser
 		return r.IOReadCloser(), nil
-	case ".lz4":
-		return io.NopCloser(lz4.NewReader(file)), nil
 	default:
 		return nil, fmt.Errorf("unsupported compression extension: %s", ext)
 	}
@@ -76,7 +72,6 @@ func loadMessagesFromFile(filePath string) (MessageList, error) {
 	slog.Debug("Successfully loaded messages", "path", filePath, "count", len(messages))
 	return messages, nil
 }
-
 
 // ---- Core Logic Functions ----
 
@@ -134,7 +129,7 @@ func generateSummaryReport(inputDir string, yearRange, monthRange, dayRange [2]i
 					for minute := 0; minute < 60; minute++ {
 						// Check for any of the supported file types
 						found := false
-						for _, ext := range []string{".gz", ".gzip", ".zst", ".lz4"} { // Added .gzip for completeness
+						for _, ext := range []string{".gz", ".gzip", ".zst"} { // Added .gzip for completeness
 							minuteFile := filepath.Join(hourDir, fmt.Sprintf("%02d.json%s", minute, ext))
 							if _, err := os.Stat(minuteFile); err == nil {
 								found = true
@@ -161,22 +156,36 @@ func generateSummaryReport(inputDir string, yearRange, monthRange, dayRange [2]i
 }
 
 // getCompressionWriter returns the correct compression writer and file extension.
-func getCompressionWriter(w io.Writer, compressionType string) (io.WriteCloser, string, error) {
+func getCompressionWriter(w io.Writer, compressionType string, level int) (io.WriteCloser, string, error) {
+	slog.Debug("Creating compression writer", "type", compressionType, "level", level)
 	switch compressionType {
 	case "gzip":
-		return gzip.NewWriter(w), ".gz", nil
+		// A level of 0 from the flag means "use default". The gzip library interprets 0 as
+		// "no compression", while -1 is the default. We adjust it here.
+		if level == 0 {
+			level = gzip.DefaultCompression
+		}
+		writer, err := gzip.NewWriterLevel(w, level)
+		return writer, ".gz", err
+
 	case "zstd":
-		writer, err := zstd.NewWriter(w)
+		// A level of 0 from the flag means "use default". The zstd library correctly
+		// interprets not passing any level option as using its default, so we only add the
+		// option if the level is non-zero.
+		var opts []zstd.EOption
+		if level != 0 {
+			opts = append(opts, zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(level)))
+		}
+		writer, err := zstd.NewWriter(w, opts...)
 		return writer, ".zst", err
-	case "lz4":
-		return lz4.NewWriter(w), ".lz4", nil
+
 	default:
 		return nil, "", fmt.Errorf("unsupported compression type: %s", compressionType)
 	}
 }
 
 // aggregateMessages uses a streaming approach to aggregate files.
-func aggregateMessages(inputDir, outputDir, aggregateFrom, aggregateTo, outputCompression string, inputCompression []string) {
+func aggregateMessages(inputDir, outputDir, aggregateFrom, aggregateTo, outputCompression string, inputCompression []string, compressionLevel int) {
 	slog.Info("Starting message aggregation",
 		"input_dir", inputDir,
 		"output_dir", outputDir,
@@ -184,6 +193,7 @@ func aggregateMessages(inputDir, outputDir, aggregateFrom, aggregateTo, outputCo
 		"to", aggregateTo,
 		"output_compression", outputCompression,
 		"input_compression", inputCompression,
+		"compression_level", compressionLevel,
 	)
 
 	fromLevels := map[string]int{"minute": 5, "hour": 4, "day": 3, "month": 2, "year": 1}
@@ -203,7 +213,7 @@ func aggregateMessages(inputDir, outputDir, aggregateFrom, aggregateTo, outputCo
 
 	// Define which compression types to look for. Default to all if none specified.
 	if len(inputCompression) == 0 {
-		inputCompression = []string{"gzip", "zstd", "lz4"}
+		inputCompression = []string{"gzip", "zstd"}
 	}
 	slog.Debug("Will look for input files with types", "types", inputCompression)
 	// Create a set of allowed canonical compression types (e.g. "gzip")
@@ -216,7 +226,6 @@ func aggregateMessages(inputDir, outputDir, aggregateFrom, aggregateTo, outputCo
 		".gz":   "gzip",
 		".gzip": "gzip",
 		".zst":  "zstd",
-		".lz4":  "lz4",
 	}
 
 	filesToProcess := make(map[string][]string)
@@ -263,7 +272,7 @@ func aggregateMessages(inputDir, outputDir, aggregateFrom, aggregateTo, outputCo
 	slog.Info("File scan complete. Starting aggregation streaming.", "groups", len(filesToProcess))
 
 	for key, filePaths := range filesToProcess {
-		_, fileExt, err := getCompressionWriter(io.Discard, outputCompression)
+		_, fileExt, err := getCompressionWriter(io.Discard, outputCompression, compressionLevel)
 		if err != nil {
 			slog.Error("Invalid output compression type", "type", outputCompression, "error", err)
 			continue
@@ -282,7 +291,12 @@ func aggregateMessages(inputDir, outputDir, aggregateFrom, aggregateTo, outputCo
 			continue
 		}
 
-		compWriter, _, _ := getCompressionWriter(outFile, outputCompression)
+		compWriter, _, err := getCompressionWriter(outFile, outputCompression, compressionLevel)
+		if err != nil {
+			slog.Error("Failed to create compression writer", "path", outputFile, "error", err)
+			outFile.Close() // Clean up the file handle
+			continue
+		}
 		jsonEncoder := json.NewEncoder(compWriter)
 		jsonEncoder.SetIndent("", "  ")
 
@@ -404,7 +418,6 @@ func uploadDirectoryToBlob(inputDir, storageAccountName, containerName, accessKe
 	slog.Info("Azure Blob Storage upload process finished.")
 }
 
-
 // ---- Cobra Commands Setup ----
 
 func main() {
@@ -463,7 +476,8 @@ func main() {
 			aggregateTo, _ := cmd.Flags().GetString("aggregate-to")
 			outputCompression, _ := cmd.Flags().GetString("output-compression")
 			inputCompression, _ := cmd.Flags().GetStringSlice("input-compression")
-			aggregateMessages(inputDir, outputDir, aggregateFrom, aggregateTo, outputCompression, inputCompression)
+			compressionLevel, _ := cmd.Flags().GetInt("output-compression-level")
+			aggregateMessages(inputDir, outputDir, aggregateFrom, aggregateTo, outputCompression, inputCompression, compressionLevel)
 		},
 	}
 	aggregateCmd.Flags().String("input-dir", "", "Directory containing the input files (required)")
@@ -473,9 +487,10 @@ func main() {
 	aggregateCmd.Flags().String("aggregate-from", "minute", "Level to aggregate files from (minute, hour, day, month)")
 	aggregateCmd.Flags().String("aggregate-to", "", "Level to aggregate messages to (hour, day, month, year) (required)")
 	aggregateCmd.MarkFlagRequired("aggregate-to")
-	aggregateCmd.Flags().String("output-compression", "", "Output compression format (gzip, zstd, lz4) (required)")
+	aggregateCmd.Flags().String("output-compression", "", "Output compression format (gzip, zstd) (required)")
 	aggregateCmd.MarkFlagRequired("output-compression")
-	aggregateCmd.Flags().StringSlice("input-compression", []string{}, "Comma-separated list of input formats to search for (gzip, zstd, lz4). Defaults to all.")
+	aggregateCmd.Flags().Int("output-compression-level", 0, "Compression level for output files. 0 means default. (gzip: 1-9, zstd: -7-22)")
+	aggregateCmd.Flags().StringSlice("input-compression", []string{}, "Comma-separated list of input formats to search for (gzip, zstd). Defaults to all.")
 
 	// -- Upload Command --
 	var uploadCmd = &cobra.Command{
@@ -505,4 +520,3 @@ func main() {
 		os.Exit(1)
 	}
 }
-
