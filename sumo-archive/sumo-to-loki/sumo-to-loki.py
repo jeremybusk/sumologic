@@ -172,13 +172,35 @@ def process_file(
     valid.sort(key=lambda e: int(e["map"]["_messagetime"]))
 
     # group into streams
+# helper inside process_file or at module-level
+def sanitize_label_key(k, fallback_prefix="label", idx=0):
+    k = k.replace('.', '_').replace('-', '_')
+    if not k or not k[0].isalpha():
+        k = f"{fallback_prefix}_{k}"
+    if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', k):
+        k = f"{fallback_prefix}_{idx}"
+    return k
+
+    # group into streams
     streams = {}
-    for e in valid:
+    for e_idx, e in enumerate(valid):
         original_map = e["map"]
+
+        # collect initial raw labels
         if leave_labels is None:
-            labels = {k: v for k, v in original_map.items() if k not in ("_raw", "_receipttime", "_messagetime")}
+            raw_labels = {k: v for k, v in original_map.items() if k not in ("_raw", "_receipttime", "_messagetime")}
         else:
-            labels = {k: original_map[k] for k in leave_labels if k in original_map}
+            raw_labels = {k: original_map[k] for k in leave_labels if k in original_map}
+
+        # sanitize labels
+        labels = {}
+        for i, (k, v) in enumerate(raw_labels.items()):
+            clean_k = sanitize_label_key(k, idx=i)
+            labels[clean_k] = str(v)
+
+        if not labels:
+            labels["job"] = "sumo"
+
 
         raw = original_map.get("_raw", "")
         ts_ms = int(original_map["_messagetime"])
