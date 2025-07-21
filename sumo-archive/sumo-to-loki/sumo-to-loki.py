@@ -10,15 +10,14 @@ import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-
+import re
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import zstandard
+import io
 
-# lock to serialize writes to curl.out\ curl_lock = threading.Lock()
-
-# --- Utility Functions ---
+curl_lock = threading.Lock()
 
 def setup_logging(level_name, log_file=None):
     level = getattr(logging, level_name.upper(), logging.INFO)
@@ -40,13 +39,10 @@ def setup_logging(level_name, log_file=None):
             logging.error(f"Could not open log file {log_file}: {e}")
             sys.exit(1)
 
-
 def get_env_or_arg(env_var, arg_val):
     return os.environ.get(env_var) if arg_val is None else arg_val
 
-
 def parse_kv_list(kv_str):
-    """Parses comma-separated key=value pairs into a dict."""
     if not kv_str:
         return {}
     out = {}
@@ -58,13 +54,10 @@ def parse_kv_list(kv_str):
         out[k.strip()] = v.strip()
     return out
 
-
 def parse_list(list_str, default=None):
-    """Parses comma-separated list into Python list, or returns default."""
     if list_str is None:
         return default or []
     return [item.strip() for item in list_str.split(",") if item.strip()]
-
 
 def generate_file_paths(start_dt, end_dt, base_dir, granularity, compression):
     delta_map = {
@@ -99,7 +92,6 @@ def generate_file_paths(start_dt, end_dt, base_dir, granularity, compression):
         logging.warning("No files found in the specified range.")
     return paths
 
-
 def create_session_with_retries():
     sess = requests.Session()
     retry = Retry(
@@ -112,7 +104,6 @@ def create_session_with_retries():
     sess.mount("http://", adapter)
     sess.mount("https://", adapter)
     return sess
-
 
 def verify_stream(stream_labels, first_ts, last_ts, query_url, auth, verify_tls, session):
     selector = "{" + ",".join(f'{k}="{v}"' for k,v in stream_labels.items()) + "}"
@@ -131,9 +122,6 @@ def verify_stream(stream_labels, first_ts, last_ts, query_url, auth, verify_tls,
         logging.error(f"[verify] request failed for {selector}: {e}")
         return False
 
-
-# --- Core Logic ---
-
 def process_file(
     file_path,
     compression_format,
@@ -142,7 +130,8 @@ def process_file(
     auth,
     add_labels,
     remove_labels,
-    leave_labels,
+    keep_labels,
+    label_limit,
     verify_tls,
     verify_push=False,
     verify_delay=5,
@@ -151,7 +140,15 @@ def process_file(
     session=None,
     batch_size=1000
 ):
-    logging.info(f"Processing {file_path}")
+    def sanitize_label_key(k, fallback_prefix="label", idx=0):
+        k = k.replace('.', '_').replace('-', '_')
+        if not k or not k[0].isalpha():
+            k = f"{fallback_prefix}_{k}"
+        if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', k):
+            k = f"{fallback_prefix}_{idx}"
+        return k
+
+    logging.info(f"📄 Processing {file_path}")
     try:
         if compression_format == "gz":
             with gzip.open(file_path, "rt", encoding="utf-8") as f:
@@ -159,56 +156,55 @@ def process_file(
         else:
             dctx = zstandard.ZstdDecompressor()
             with open(file_path, "rb") as f, dctx.stream_reader(f) as reader:
-                entries = json.load(reader)
+                text_stream = io.TextIOWrapper(reader, encoding="utf-8")
+                entries = json.load(text_stream)
     except Exception as e:
-        logging.error(f"Failed to read/decompress {file_path}: {e}")
+        logging.error(f"❌ Failed to read/decompress {file_path}: {e}")
         return
 
-    # filter & sort
+    logging.debug(f"✅ Loaded {len(entries)} entries from {file_path}")
+
     valid = [e for e in entries if "map" in e and "_messagetime" in e["map"]]
+    logging.debug(f"📝 Valid entries after filter: {len(valid)}")
+
     if not valid:
-        logging.info(f"No valid entries in {file_path}")
+        logging.warning(f"⚠️ No valid entries in {file_path}")
         return
+
     valid.sort(key=lambda e: int(e["map"]["_messagetime"]))
 
-    # group into streams
-# helper inside process_file or at module-level
-def sanitize_label_key(k, fallback_prefix="label", idx=0):
-    k = k.replace('.', '_').replace('-', '_')
-    if not k or not k[0].isalpha():
-        k = f"{fallback_prefix}_{k}"
-    if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', k):
-        k = f"{fallback_prefix}_{idx}"
-    return k
-
-    # group into streams
     streams = {}
     for e_idx, e in enumerate(valid):
         original_map = e["map"]
 
-        # collect initial raw labels
-        if leave_labels is None:
-            raw_labels = {k: v for k, v in original_map.items() if k not in ("_raw", "_receipttime", "_messagetime")}
-        else:
-            raw_labels = {k: original_map[k] for k in leave_labels if k in original_map}
+        if keep_labels and remove_labels:
+            logging.error("❌ Cannot use both --keep-labels and --remove-labels. Skipping.")
+            return
 
-        # sanitize labels
+        if keep_labels:
+            raw_labels = {k: original_map[k] for k in keep_labels if k in original_map}
+        else:
+            raw_labels = {k: v for k, v in original_map.items() if k not in ("_raw", "_receipttime", "_messagetime")}
+            for k in remove_labels:
+                raw_labels.pop(k, None)
+
         labels = {}
         for i, (k, v) in enumerate(raw_labels.items()):
             clean_k = sanitize_label_key(k, idx=i)
             labels[clean_k] = str(v)
 
+        labels.update(add_labels)
+
         if not labels:
             labels["job"] = "sumo"
 
+        if len(labels) > label_limit:
+            logging.error(f"❌ Stream has {len(labels)} labels (> {label_limit}): {labels}. Skipping.")
+            continue
 
         raw = original_map.get("_raw", "")
         ts_ms = int(original_map["_messagetime"])
         ts_ns = str(ts_ms * 1_000_000)
-
-        for k in remove_labels:
-            labels.pop(k, None)
-        labels.update(add_labels)
 
         message = f"{raw} {' '.join(f'{k}={v}' for k,v in add_labels.items())}" if add_labels else raw
 
@@ -218,37 +214,41 @@ def sanitize_label_key(k, fallback_prefix="label", idx=0):
         streams[key]["values"].append([ts_ns, message])
 
     if not streams:
-        logging.info(f"{file_path}: no streams to push")
+        logging.warning(f"⚠️ {file_path}: no streams to push")
         return
 
-    # If create_curl is set, generate curl commands and exit
+    logging.debug(f"🔗 Generated {len(streams)} streams from {file_path}")
+
     if create_curl:
-        payload_str = json.dumps({"streams": list(streams.values())})
-        curl_cmd = f'''curl -vk -u "${{LOKI_USER}}:${{LOKI_PASS}}" \
-  -H "X-Scope-OrgID: ${{ORG_ID}}" \
-  -H "Content-Type: application/json" \
-  -XPOST "${{LOKI_URL}}" \
+        payload_str = json.dumps({"streams": list(streams.values())}, indent=2)
+        curl_cmd = f'''curl -vk -u "${{LOKI_USER}}:${{LOKI_PASS}}" \\
+  -H "X-Scope-OrgID: ${{ORG_ID}}" \\
+  -H "Content-Type: application/json" \\
+  -XPOST "${{LOKI_URL}}" \\
   --data-raw '{payload_str}'
 
 '''
         with curl_lock:
             with open("curl.out", "a") as cf:
                 cf.write(curl_cmd)
-        logging.info(f"Wrote curl command for {file_path} to curl.out")
+        logging.info(f"✍️ Wrote curl command for {file_path} to curl.out")
         return
 
     if not verify_tls:
         requests.packages.urllib3.disable_warnings()
 
-    # Send in batches per stream
-    for s in streams.values():
+    for s_idx, s in enumerate(streams.values()):
         all_values = s["values"]
+        logging.debug(f"📦 Stream {s_idx+1}: {len(all_values)} entries, labels={s['stream']}")
+
         for start in range(0, len(all_values), batch_size):
             chunk = all_values[start:start + batch_size]
             payload = {"streams": [{"stream": s["stream"], "values": chunk}]}
             headers = {"Content-Type": "application/json"}
             if tenant:
                 headers["X-Scope-OrgID"] = tenant
+
+            logging.debug(f"🚀 Pushing batch [{start}:{start+len(chunk)}] of stream {s_idx+1} with {len(chunk)} entries")
 
             try:
                 resp = session.post(
@@ -260,28 +260,10 @@ def sanitize_label_key(k, fallback_prefix="label", idx=0):
                     timeout=30
                 )
                 resp.raise_for_status()
-                logging.info(f"Pushed {len(chunk)} entries from {file_path} (stream={s['stream']})")
+                logging.info(f"✅ Pushed {len(chunk)} entries from {file_path} (stream labels={s['stream']})")
             except requests.RequestException as e:
-                logging.error(f"Chunk push failed for {file_path}: {e}")
+                logging.error(f"❌ Chunk push failed for {file_path}: {e}")
                 continue
-
-            # Optional verification for this chunk
-            if verify_push:
-                query_url = loki_push_url.replace("/push", "/query_range")
-                first_ts = chunk[0][0]
-                last_ts = chunk[-1][0]
-                passed = False
-                for attempt in range(1, verify_max_attempts + 1):
-                    time.sleep(verify_delay)
-                    if verify_stream(s["stream"], first_ts, last_ts, query_url, auth, verify_tls, session):
-                        logging.info(f"[verify] success for {s['stream']} on attempt {attempt}")
-                        passed = True
-                        break
-                    else:
-                        logging.warning(f"[verify] retry {attempt} failed for {s['stream']}")
-                if not passed:
-                    logging.error(f"[verify] failed for {s['stream']} after {verify_max_attempts} attempts")
-
 
 def main():
     p = argparse.ArgumentParser(
@@ -295,30 +277,22 @@ def main():
     p.add_argument("--message-files-dir", required=True, help="Base dir for log files.")
     p.add_argument("--compression-format", choices=["gz","zst"], required=True)
     p.add_argument("--message-files-format", choices=["minute","hour","day"], required=True)
-    p.add_argument("--from-datetime", required=True,
-                   help="ISO8601 start (e.g. 2025-01-01T00:00:00Z)")
-    p.add_argument("--to-datetime", required=True,
-                   help="ISO8601 end   (e.g. 2025-01-01T23:59:59Z)")
-    p.add_argument("--add-labels",    help="e.g. env=prod,region=us-east-1")
-    p.add_argument("--remove-labels", help="e.g. _collectorid,_blockid")
-    p.add_argument(
-        "--leave-labels",
-        help="Comma-separated incoming labels to preserve; if omitted, preserves all except _raw, _receipttime, _messagetime"
-    )
-    p.add_argument("--verify-push",  action="store_true",
-                   help="After push, verify logs arrived")
-    p.add_argument("--verify-delay", type=int, default=5,
-                   help="Seconds to wait between verify attempts")
-    p.add_argument("--verify-max-attempts", type=int, default=1,
-                   help="Maximum verify attempts before giving up")
-    p.add_argument("--create-curl", action="store_true",
-                   help="Generate bash curl commands in curl.out instead of sending")
-    p.add_argument("--log-file",    help="Log file path.")
-    p.add_argument("--log-level",   default="INFO",
-                   choices=["DEBUG","INFO","WARNING","ERROR","CRITICAL"])
+    p.add_argument("--from-datetime", required=True)
+    p.add_argument("--to-datetime", required=True)
+    p.add_argument("--add-labels", help="e.g. env=prod,region=us-east-1")
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--remove-labels", help="e.g. _collectorid,_blockid")
+    group.add_argument("--keep-labels", help="e.g. host,job")
+    p.add_argument("--label-limit", type=int, default=15,
+                   help="Maximum number of labels per stream (default: 15)")
+    p.add_argument("--verify-push", action="store_true")
+    p.add_argument("--verify-delay", type=int, default=5)
+    p.add_argument("--verify-max-attempts", type=int, default=1)
+    p.add_argument("--create-curl", action="store_true")
+    p.add_argument("--log-file")
+    p.add_argument("--log-level", default="INFO", choices=["DEBUG","INFO","WARNING","ERROR","CRITICAL"])
     p.add_argument("--concurrency", type=int, default=10)
-    p.add_argument("--batch-size", type=int, default=1000,
-                   help="Maximum number of log lines to send per HTTP request.")
+    p.add_argument("--batch-size", type=int, default=1000)
 
     args = p.parse_args()
     setup_logging(args.log_level, args.log_file)
@@ -329,35 +303,20 @@ def main():
         logging.info("Initialized curl.out")
 
     loki_url = get_env_or_arg("LOKI_PUSH_URL", args.loki_push_url)
-    tenant   = get_env_or_arg("LOKI_TENANT",     args.tenant)
-    user     = get_env_or_arg("LOKI_USER",      args.basic_auth_user)
-    passwd   = get_env_or_arg("LOKI_PASS",      args.basic_auth_pass)
+    tenant   = get_env_or_arg("LOKI_TENANT", args.tenant)
+    user     = get_env_or_arg("LOKI_USER", args.basic_auth_user)
+    passwd   = get_env_or_arg("LOKI_PASS", args.basic_auth_pass)
     if not loki_url:
         logging.error("Loki push URL is required.")
         sys.exit(1)
     auth = (user, passwd) if user and passwd else None
 
-    add_labels    = parse_kv_list(args.add_labels)
+    add_labels = parse_kv_list(args.add_labels)
     remove_labels = parse_list(args.remove_labels, default=[])
+    keep_labels = parse_list(args.keep_labels) if args.keep_labels else None
 
-    if args.leave_labels:
-        leave_labels = parse_list(args.leave_labels)
-    else:
-        leave_labels = None
-
-    try:
-        start_dt = datetime.fromisoformat(
-            args.from_datetime.replace("Z","+00:00")
-        ).astimezone(timezone.utc)
-        end_dt   = datetime.fromisoformat(
-            args.to_datetime.replace("Z","+00:00")
-        ).astimezone(timezone.utc)
-    except ValueError as e:
-        logging.error(f"Invalid datetime: {e}")
-        sys.exit(1)
-    if start_dt > end_dt:
-        logging.error("`--from-datetime` must be ≤ `--to-datetime`.")
-        sys.exit(1)
+    start_dt = datetime.fromisoformat(args.from_datetime.replace("Z","+00:00")).astimezone(timezone.utc)
+    end_dt = datetime.fromisoformat(args.to_datetime.replace("Z","+00:00")).astimezone(timezone.utc)
 
     paths = generate_file_paths(
         start_dt, end_dt,
@@ -367,10 +326,8 @@ def main():
     if not paths:
         sys.exit(0)
 
-    session    = create_session_with_retries()
+    session = create_session_with_retries()
     verify_tls = not args.skip_tls_verify
-    if not verify_tls:
-        logging.warning("TLS verification disabled.")
 
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=args.concurrency, thread_name_prefix="wrk"
@@ -385,7 +342,8 @@ def main():
                 auth,
                 add_labels,
                 remove_labels,
-                leave_labels,
+                keep_labels,
+                args.label_limit,
                 verify_tls,
                 args.verify_push,
                 args.verify_delay,
@@ -398,8 +356,7 @@ def main():
         ]
         concurrent.futures.wait(futures)
 
-    logging.info("Done.")
-
+    logging.info("✅ Done.")
 
 if __name__ == "__main__":
     main()
