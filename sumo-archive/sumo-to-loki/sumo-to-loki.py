@@ -213,11 +213,20 @@ def process_file(
             streams[key] = {"stream": labels, "values": []}
         streams[key]["values"].append([ts_ns, message])
 
-    if not streams:
-        logging.warning(f"⚠️ {file_path}: no streams to push")
+    # Filter out empty streams
+    valid_streams = []
+    for s_idx, s in enumerate(streams.values()):
+        if not s["values"]:
+            logging.warning(f"🚫 Stream {s_idx+1} with labels={s['stream']} has no values, skipping")
+            continue
+        valid_streams.append(s)
+
+    if not valid_streams:
+        logging.warning(f"⚠️ All streams empty for {file_path}, nothing to push")
         return
 
-    logging.debug(f"🔗 Generated {len(streams)} streams from {file_path}")
+    logging.debug(f"🔗 Generated {len(valid_streams)} valid streams from {file_path}")
+
 
     if create_curl:
         payload_str = json.dumps({"streams": list(streams.values())}, indent=2)
