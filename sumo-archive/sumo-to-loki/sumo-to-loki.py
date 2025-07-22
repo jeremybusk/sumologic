@@ -140,9 +140,10 @@ def process_file(
     session=None,
     batch_size=1000
 ):
-    def sanitize_label_key(k, fallback_prefix="label", idx=0):
+    def sanitize_label_key(k, fallback_prefix="x", idx=0):
         k = k.replace('.', '_').replace('-', '_')
-        if not k or not k[0].isalpha():
+        # if not k or not k[0].isalpha():
+        if not k or not re.match(r'^[a-zA-Z_]', k):
             k = f"{fallback_prefix}_{k}"
         if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', k):
             k = f"{fallback_prefix}_{idx}"
